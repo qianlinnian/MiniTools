@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "id": "linkfei",
+      "name": "LinkFei 飞书助手",
+      "description": "飞书聊天、文档、主动通知与网页监控",
+      "kind": "http-runtime",
+      "workingDirectory": "..\\linkfei",
+      "runtimePath": "..\\linkfei\\data\\linkfei-runtime.json",
+      "logsDirectory": "..\\linkfei\\logs",
+      "autoStart": true,
+      "restartOnFailure": true,
+      "start": {
+        "executable": "node",
+        "fallbackExecutable": "%ProgramFiles%\\nodejs\\node.exe",
+        "arguments": ["src/index.mjs"],
+        "redirectLogs": true
+      }
+    },
+    {
+      "id": "codex-quota",
+      "name": "Codex 额度托盘",
+      "description": "在通知区显示 Codex 剩余额度",
+      "kind": "managed-process",
+      "workingDirectory": "..\\codex-quota-tray",
+      "runtimePath": "%LOCALAPPDATA%\\CodexQuotaTray\\runtime.json",
+      "stopRequestPath": "%LOCALAPPDATA%\\CodexQuotaTray\\stop.request",
+      "showRequestPath": "%LOCALAPPDATA%\\CodexQuotaTray\\show.request",
+      "logsDirectory": "%LOCALAPPDATA%\\CodexQuotaTray",
+      "autoStart": true,
+      "restartOnFailure": true,
+      "start": {
+        "executable": "powershell.exe",
+        "arguments": [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-WindowStyle",
+          "Hidden",
+          "-File",
+          "${toolPath}\\Start-CodexQuotaTray.ps1"
+        ],
+        "redirectLogs": false
+      }
+    },
+    {
+      "id": "zotero-reading-toolkit",
+      "name": "Zotero Reading Toolkit",
+      "description": "阅读状态、PDF 进度与语义标注扩展",
+      "kind": "static-tool",
+      "workingDirectory": "..\\zotero-reading-toolkit",
+      "autoStart": false,
+      "restartOnFailure": false
+    }
+  ]
+}

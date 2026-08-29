@@ -1,0 +1,26 @@
+{
+  "name": "linkfei",
+  "version": "0.1.0",
+  "private": true,
+  "description": "飞书长连接机器人，通过 DeepSeek 提供问答能力。",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "tray": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"windows/Start-LinkFeiTray.ps1\"",
+    "notify": "node scripts/linkfei-notify-cli.mjs",
+    "check:config": "node scripts/check-config.mjs",
+    "check:deepseek": "node scripts/check-deepseek.mjs",
+    "check:memory": "node scripts/check-memory-integration.mjs",
+    "check:feishu-doc": "node scripts/check-feishu-docs.mjs --create-test-document --delete-after-check",
+    "doc:cli": "node scripts/feishu-doc-cli.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.64.0",
+    "cheerio": "^1.2.0",
+    "dotenv": "^16.4.7"
+  }
+}

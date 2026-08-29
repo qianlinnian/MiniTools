@@ -1,0 +1,29 @@
+<groupbox
+  xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  xmlns:html="http://www.w3.org/1999/xhtml"
+  onload="Zotero.ReadingTracker.initPreferences(document)"
+>
+  <html:p style="margin: 0 0 12px 0; color: var(--zotero-secondary-text-color);">
+    为 Zotero 的八种标注颜色设置语义名称。修改会在下次打开标注菜单时生效。
+  </html:p>
+
+  <html:div style="display:flex;flex-direction:column;gap:8px;margin:0 0 16px 0;">
+    <html:label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+      <html:input type="checkbox" id="reading-toolkit-popup-vertical" />
+      选中文字后，将语义类型排成一行，名称竖排显示
+    </html:label>
+    <html:label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+      <html:input type="checkbox" id="reading-toolkit-auto-tag" />
+      自动给标注同步“标注类型/名称”标签
+    </html:label>
+  </html:div>
+
+  <html:div
+    id="reading-toolkit-annotation-types"
+    style="display:grid;grid-template-columns:28px 1fr;gap:8px 12px;align-items:center;"
+  />
+
+  <html:p style="margin:12px 0 0 0;font-size:0.85em;color:var(--zotero-secondary-text-color);">
+    清空名称会恢复默认值。颜色仍使用 Zotero 原生颜色，因此标注可以正常同步到其他设备。
+  </html:p>
+</groupbox>

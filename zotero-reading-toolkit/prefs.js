@@ -1,0 +1,10 @@
+pref("extensions.readingtracker.annotationTypes.ffd400", "背景");
+pref("extensions.readingtracker.annotationTypes.ff6666", "质疑/重要");
+pref("extensions.readingtracker.annotationTypes.5fb236", "方法");
+pref("extensions.readingtracker.annotationTypes.2ea8e5", "结论");
+pref("extensions.readingtracker.annotationTypes.a28ae5", "创新");
+pref("extensions.readingtracker.annotationTypes.e56eee", "不足");
+pref("extensions.readingtracker.annotationTypes.f19837", "待办");
+pref("extensions.readingtracker.annotationTypes.aaaaaa", "引用/旁支");
+pref("extensions.readingtracker.annotationTypes.popupVertical", true);
+pref("extensions.readingtracker.annotationTypes.autoTag", true);

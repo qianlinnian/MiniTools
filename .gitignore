@@ -1,0 +1,34 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies
+**/node_modules/
+
+# Runtime data and logs
+**/data/
+**/logs/
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+**/runtime.json
+**/*.request
+
+# Build and release artifacts
+**/releases/
+*.zip
+*.xpi
+
+# Local preview artifacts
+.controller-preview/
+.quota-preview*/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

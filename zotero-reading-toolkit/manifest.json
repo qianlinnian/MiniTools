@@ -1,0 +1,15 @@
+{
+  "manifest_version": 2,
+  "name": "Zotero Reading Toolkit",
+  "version": "0.2.4",
+  "description": "Semantic annotation types and mutually exclusive reading-status tags.",
+  "author": "Local toolkit",
+  "applications": {
+    "zotero": {
+      "id": "reading-tracker@local.invalid",
+      "update_url": "https://reading-tracker.local.invalid/updates.json",
+      "strict_min_version": "8.0",
+      "strict_max_version": "10.999"
+    }
+  }
+}
