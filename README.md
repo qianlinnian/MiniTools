@@ -11,7 +11,7 @@
 | [MiniTools 控制中心](minitools-controller/README.md) | 统一显示状态、启动、停止、打开并自动恢复本地工具 | Windows PowerShell 5.1 |
 | [Codex Quota Tray](codex-quota-tray/README.md) | 在通知区域用双环展示 Codex 短周期和长周期剩余额度 | Windows 10/11、已登录的 Codex |
 | [LinkFei](linkfei/README.md) | 飞书长连接机器人、DeepSeek 问答、文档、记忆与网页监控 | Node.js 22.5+、飞书应用、DeepSeek API |
-| [Zotero Reading Toolkit](zotero-reading-toolkit/README.md) | Zotero 阅读状态、PDF 进度和语义标注类型 | Zotero 8–10 |
+| [Zotero Reading Toolkit](zotero-reading-toolkit/README.md) | Zotero 阅读状态互斥和语义标注类型 | Zotero 8–10 |
 
 各工具可以独立使用；控制中心通过 [`tools.json`](minitools-controller/tools.json) 将它们组合在一起。
 

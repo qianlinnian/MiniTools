@@ -47,7 +47,7 @@
     {
       "id": "zotero-reading-toolkit",
       "name": "Zotero Reading Toolkit",
-      "description": "阅读状态、PDF 进度与语义标注扩展",
+      "description": "阅读状态互斥与语义标注扩展",
       "kind": "static-tool",
       "workingDirectory": "..\\zotero-reading-toolkit",
       "autoStart": false,
