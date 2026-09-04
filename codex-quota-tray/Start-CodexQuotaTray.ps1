@@ -130,7 +130,7 @@ if (-not ('CodexAppServerTransport' -as [type])) {
 
 $script:AppName = 'CodexQuotaTray'
 $script:AppTitle = 'Codex 剩余额度'
-$script:Version = '1.4.0'
+$script:Version = '1.4.3'
 $script:AppDataDirectory = Join-Path $env:LOCALAPPDATA $script:AppName
 $script:LogPath = Join-Path $script:AppDataDirectory 'app.log'
 $script:CachePath = Join-Path $script:AppDataDirectory 'quota-cache.json'
@@ -148,6 +148,10 @@ $script:LastResponseAt = [datetime]::MinValue
 $script:LastThemeIsLight = $null
 $script:LastIconKey = $null
 $script:LastRowsKey = $null
+$script:QuotaCardViews = @()
+$script:ManualRefreshState = 'idle'
+$script:ManualRefreshStartedAt = [datetime]::MinValue
+$script:ManualRefreshCompletedAt = [datetime]::MinValue
 $script:ReconnectAt = [datetime]::MinValue
 $script:ConnectionState = '正在连接 Codex…'
 $script:ExitRequested = $false
@@ -411,9 +415,15 @@ function Load-SnapshotCache {
 }
 
 function Restart-AppServerForRefresh {
+    param([switch]$ShowFeedback)
+    if ($ShowFeedback -and $script:ManualRefreshState -eq 'refreshing') { return }
+    if ($ShowFeedback) {
+        $script:ManualRefreshState = 'refreshing'
+        $script:ManualRefreshStartedAt = Get-Date
+    }
     $script:ConnectionState = '正在同步当前账号…'
     Start-AppServer
-    if ($null -eq $script:Snapshot) { Update-Interface }
+    if ($ShowFeedback -or $null -eq $script:Snapshot) { Update-Interface }
 }
 
 function Get-AutoStartEnabled {
@@ -583,7 +593,7 @@ $script:RefreshButton.FlatAppearance.BorderSize = 0
 $script:RefreshButton.Cursor = [System.Windows.Forms.Cursors]::Hand
 
 $script:SourceLabel = New-Object System.Windows.Forms.Label
-$script:SourceLabel.Text = '官方接口 · 只读连接'
+$script:SourceLabel.Text = ''
 $script:SourceLabel.Font = New-Object System.Drawing.Font $fontFamily, 8.5
 $script:SourceLabel.Location = New-Object System.Drawing.Point 22, 308
 $script:SourceLabel.Size = New-Object System.Drawing.Size 245, 22
@@ -623,19 +633,66 @@ function Set-RoundedRegion {
     $path.Dispose()
 }
 
-function Rebuild-QuotaRows {
-    $snapshotKey = if ($null -eq $script:Snapshot) {
-        'none:{0}' -f $script:ConnectionState
-    } else {
-        $windowKey = @($script:Snapshot.Windows | ForEach-Object { '{0}:{1}:{2}' -f $_.LimitId, $_.RemainingPercent, $_.ResetsAt }) -join ','
-        '{0}:{1}:{2}' -f $script:Snapshot.RemainingPercent, $script:Snapshot.IsCached, $windowKey
+function Enable-DoubleBuffering {
+    param([System.Windows.Forms.Control]$Control)
+    if ($null -eq $Control) { return }
+    try {
+        $flags = [System.Reflection.BindingFlags]::Instance -bor [System.Reflection.BindingFlags]::NonPublic
+        $property = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', $flags)
+        if ($null -ne $property) { $property.SetValue($Control, $true, $null) }
+    } catch { }
+}
+
+function Update-QuotaCardValues {
+    param([object[]]$Windows)
+    if ($null -eq $Windows) { $Windows = @() }
+    $count = [math]::Min($Windows.Count, $script:QuotaCardViews.Count)
+    for ($index = 0; $index -lt $count; $index++) {
+        $window = $Windows[$index]
+        $view = $script:QuotaCardViews[$index]
+        $accent = if ($index -eq 0) { $script:ThemeColors.Accent } else { $script:ThemeColors.AccentSecondary }
+        $name = Format-WindowDuration $window.WindowDurationMins
+        if ($window.LimitId -ne 'codex') { $name = '{0} · {1}' -f $window.LimitName, $name }
+        $period = if ($index -eq 0 -and $Windows.Count -gt 1) { '短周期' } elseif ($Windows.Count -gt 1) { '长周期' } else { '额度周期' }
+        $remaining = [int][math]::Round($window.RemainingPercent)
+        $used = [int][math]::Round($window.UsedPercent)
+        $reset = if ($null -eq $window.ResetsAt) { '重置时间未知' } else { '{0} 重置' -f ([datetime]$window.ResetsAt).ToString('M月d日 HH:mm') }
+        $fillWidth = [math]::Max(1, [int][math]::Round($view.Track.Width * ([double]$window.RemainingPercent / 100)))
+
+        $view.Card.SuspendLayout()
+        if ($view.NameLabel.Text -ne $name) { $view.NameLabel.Text = $name }
+        if ($view.PeriodLabel.Text -ne $period) { $view.PeriodLabel.Text = $period }
+        if ($view.PeriodLabel.ForeColor -ne $accent) { $view.PeriodLabel.ForeColor = $accent }
+        if ($view.ValueLabel.Text -ne ('{0}%' -f $remaining)) { $view.ValueLabel.Text = '{0}%' -f $remaining }
+        if ($view.UsedLabel.Text -ne ('已用 {0}%' -f $used)) { $view.UsedLabel.Text = '已用 {0}%' -f $used }
+        if ($view.ResetLabel.Text -ne $reset) { $view.ResetLabel.Text = $reset }
+        if ($view.Fill.BackColor -ne $accent) { $view.Fill.BackColor = $accent }
+        if ($view.Fill.Width -ne $fillWidth) {
+            $view.Fill.Width = $fillWidth
+            Set-RoundedRegion $view.Fill 4
+        }
+        $view.Card.ResumeLayout($false)
     }
-    $rowsKey = '{0}|theme:{1}' -f $snapshotKey, $script:LastThemeIsLight
-    if ($script:LastRowsKey -eq $rowsKey) { return }
+}
+
+function Rebuild-QuotaRows {
+    $windows = if ($null -eq $script:Snapshot) { @() } else { @(Get-DisplayQuotaWindows $script:Snapshot | Select-Object -First 2) }
+    $layoutKey = if ($windows.Count -eq 0) {
+        'empty'
+    } else {
+        @($windows | ForEach-Object { '{0}:{1}:{2}' -f $_.LimitId, $_.LimitName, $_.WindowDurationMins }) -join '|'
+    }
+    $rowsKey = '{0}|count:{1}|theme:{2}' -f $layoutKey, $windows.Count, $script:LastThemeIsLight
+    if ($script:LastRowsKey -eq $rowsKey) {
+        Update-QuotaCardValues -Windows $windows
+        return
+    }
     $script:LastRowsKey = $rowsKey
 
+    $script:QuotaRowsPanel.SuspendLayout()
     foreach ($oldControl in @($script:QuotaRowsPanel.Controls)) { $oldControl.Dispose() }
     $script:QuotaRowsPanel.Controls.Clear()
+    $script:QuotaCardViews = @()
     $colors = $script:ThemeColors
 
     if ($null -eq $script:Snapshot) {
@@ -647,10 +704,10 @@ function Rebuild-QuotaRows {
         $placeholder.Location = New-Object System.Drawing.Point 16, 38
         $placeholder.AutoSize = $true
         $script:QuotaRowsPanel.Controls.Add($placeholder)
+        $script:QuotaRowsPanel.ResumeLayout($true)
         return
     }
 
-    $windows = @(Get-DisplayQuotaWindows $script:Snapshot)
     $singleCard = ($windows.Count -eq 1)
     for ($index = 0; $index -lt $windows.Count; $index++) {
         $window = $windows[$index]
@@ -731,10 +788,23 @@ function Rebuild-QuotaRows {
 
         $card.Controls.AddRange(@($nameLabel, $periodLabel, $valueLabel, $remainingLabel, $track, $usedLabel, $resetLabel))
         $script:QuotaRowsPanel.Controls.Add($card)
+        $script:QuotaCardViews += [pscustomobject]@{
+            Card = $card
+            NameLabel = $nameLabel
+            PeriodLabel = $periodLabel
+            ValueLabel = $valueLabel
+            Track = $track
+            Fill = $fill
+            UsedLabel = $usedLabel
+            ResetLabel = $resetLabel
+        }
+        Enable-DoubleBuffering $card
+        Enable-DoubleBuffering $track
         Set-RoundedRegion $card 12
         Set-RoundedRegion $track 4
         Set-RoundedRegion $fill 4
     }
+    $script:QuotaRowsPanel.ResumeLayout($true)
 }
 
 function Update-Theme {
@@ -800,14 +870,60 @@ function Update-Theme {
     Set-QuotaNotifyIcon -Windows $iconWindows -ThemeIsLight $isLight -HasError $hasError
 }
 
+function Apply-ManualRefreshFeedback {
+    $state = $script:ManualRefreshState
+    $restoreCards = $false
+    if ($state -eq 'success' -and ((Get-Date) - $script:ManualRefreshCompletedAt).TotalSeconds -ge 2.5) {
+        $script:ManualRefreshState = 'idle'
+        $state = 'idle'
+        $restoreCards = $true
+    } elseif ($state -eq 'failed' -and ((Get-Date) - $script:ManualRefreshCompletedAt).TotalSeconds -ge 4) {
+        $script:ManualRefreshState = 'idle'
+        $state = 'idle'
+        $restoreCards = $true
+    }
+
+    switch ($state) {
+        'refreshing' {
+            $script:RefreshButton.Enabled = $false
+            $script:RefreshButton.Text = '↻  正在刷新'
+            $script:StatusPill.Text = '●  刷新中'
+            $script:StatusLabel.Text = '正在读取当前账号额度…'
+            foreach ($view in $script:QuotaCardViews) { $view.PeriodLabel.Text = '刷新中…' }
+        }
+        'success' {
+            $script:RefreshButton.Enabled = $true
+            $script:RefreshButton.Text = '✓  已刷新'
+            $script:StatusPill.Text = '✓  已刷新'
+            $script:StatusLabel.Text = '刚刚手动刷新'
+            foreach ($view in $script:QuotaCardViews) { $view.PeriodLabel.Text = '已刷新' }
+        }
+        'failed' {
+            $script:RefreshButton.Enabled = $true
+            $script:RefreshButton.Text = '↻  重试刷新'
+            $script:StatusPill.Text = '●  刷新失败'
+            $script:StatusLabel.Text = '刷新超时，请重试'
+            foreach ($view in $script:QuotaCardViews) { $view.PeriodLabel.Text = '刷新失败' }
+        }
+        default {
+            $script:RefreshButton.Enabled = $true
+            $script:RefreshButton.Text = '↻  刷新额度'
+            if ($restoreCards -and $null -ne $script:Snapshot) {
+                Update-QuotaCardValues -Windows @(Get-DisplayQuotaWindows $script:Snapshot | Select-Object -First 2)
+            }
+        }
+    }
+}
+
 function Update-Interface {
     if ($null -eq $script:Snapshot) {
         $script:StatusLabel.Text = $script:ConnectionState
         $script:StatusPill.Text = '●  连接中'
-        $script:SourceLabel.Text = '官方接口 · 只读连接'
+        $script:SourceLabel.Text = ''
         $script:NotifyIcon.Text = ('Codex 剩余额度：{0}' -f $script:ConnectionState).Substring(0, [math]::Min(63, ('Codex 剩余额度：{0}' -f $script:ConnectionState).Length))
         Update-Theme
         Rebuild-QuotaRows
+        Apply-ManualRefreshFeedback
         return
     }
 
@@ -817,14 +933,14 @@ function Update-Interface {
     $cacheText = if ($snapshot.IsCached) { ' · 缓存数据' } else { '' }
     $script:StatusLabel.Text = ('{0}{1}' -f $ageText, $cacheText)
     $script:StatusPill.Text = if ($snapshot.IsCached) { '●  缓存' } else { '●  已连接' }
-    $planSuffix = if ([string]::IsNullOrWhiteSpace([string]$snapshot.PlanType)) { '' } else { ' · {0}' -f $snapshot.PlanType }
-    $script:SourceLabel.Text = if ($snapshot.IsCached) { '上次成功读取 · 等待重新连接' } else { '官方接口 · 只读连接{0}' -f $planSuffix }
+    $script:SourceLabel.Text = if ([string]::IsNullOrWhiteSpace([string]$snapshot.PlanType)) { '' } else { [string]$snapshot.PlanType }
     $displayWindows = @(Get-DisplayQuotaWindows $snapshot)
     $windowSummary = @($displayWindows | Select-Object -First 2 | ForEach-Object { '{0} {1}%' -f (Format-WindowDuration $_.WindowDurationMins), ([int][math]::Round($_.RemainingPercent)) }) -join ' · '
     $tooltip = if ([string]::IsNullOrWhiteSpace($windowSummary)) { 'Codex 额度已连接' } else { 'Codex · {0}' -f $windowSummary }
     $script:NotifyIcon.Text = $tooltip.Substring(0, [math]::Min(63, $tooltip.Length))
     Rebuild-QuotaRows
     Set-QuotaNotifyIcon -Windows $displayWindows -ThemeIsLight (Get-ThemeIsLight) -HasError $false
+    Apply-ManualRefreshFeedback
 }
 
 function Accept-Snapshot {
@@ -833,6 +949,10 @@ function Accept-Snapshot {
     $script:Snapshot = $Snapshot
     $script:LastResponseAt = Get-Date
     $script:ConnectionState = '已连接'
+    if ($script:ManualRefreshState -eq 'refreshing') {
+        $script:ManualRefreshState = 'success'
+        $script:ManualRefreshCompletedAt = Get-Date
+    }
     Save-SnapshotCache $Snapshot
     Update-Interface
 }
@@ -840,7 +960,7 @@ function Accept-Snapshot {
 function Process-AppServerOutput {
     if ($null -eq $script:Transport) { return }
     foreach ($errorLine in $script:Transport.DrainErrors()) {
-        if ($errorLine -match 'Failed to deserialize JSONRPCMessage: expected value at line 1 column 1') { continue }
+        if ($errorLine -match 'Failed to deserialize JSONRPCMessage: (expected value at line 1 column 1|EOF while parsing a value at line 1 column 0)') { continue }
         Write-AppLog ('app-server: {0}' -f $errorLine)
     }
     foreach ($line in $script:Transport.DrainOutput()) {
@@ -871,6 +991,10 @@ function Process-AppServerOutput {
                 $errorMessage = [string](Get-PropertyValue $errorObject 'message')
                 if ([string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage = 'Codex 返回了未知错误。' }
                 $script:ConnectionState = $errorMessage
+                if ($script:ManualRefreshState -eq 'refreshing') {
+                    $script:ManualRefreshState = 'failed'
+                    $script:ManualRefreshCompletedAt = Get-Date
+                }
                 Write-AppLog ('RPC error: {0}' -f $errorMessage)
                 Update-Interface
             }
@@ -890,9 +1014,9 @@ function Show-DetailsForm {
     $script:DetailsForm.Activate()
 }
 
-$script:RefreshButton.Add_Click({ Restart-AppServerForRefresh })
+$script:RefreshButton.Add_Click({ Restart-AppServerForRefresh -ShowFeedback })
 $script:CloseButton.Add_Click({ $script:DetailsForm.Hide() })
-$script:MenuRefresh.Add_Click({ Restart-AppServerForRefresh })
+$script:MenuRefresh.Add_Click({ Restart-AppServerForRefresh -ShowFeedback })
 $script:MenuAutoStart.Add_Click({
     try { Set-AutoStartEnabled $script:MenuAutoStart.Checked }
     catch {
@@ -935,6 +1059,10 @@ $script:UiTimer.Add_Tick({
         Show-DetailsForm
     }
     Process-AppServerOutput
+    if ($script:ManualRefreshState -eq 'refreshing' -and ((Get-Date) - $script:ManualRefreshStartedAt).TotalSeconds -ge 15) {
+        $script:ManualRefreshState = 'failed'
+        $script:ManualRefreshCompletedAt = Get-Date
+    }
     if ($null -eq $script:Transport -or -not $script:Transport.IsRunning) {
         if ((Get-Date) -ge $script:ReconnectAt) { Start-AppServer }
     } elseif (((Get-Date) - $script:LastRequestAt).TotalSeconds -ge 60) {
@@ -942,7 +1070,12 @@ $script:UiTimer.Add_Tick({
     }
     if ((Get-Date).Second % 3 -eq 0) { Update-Theme }
     if ($script:DetailsForm.Visible -and (Get-Date).Second % 5 -eq 0) { Update-Interface }
+    if ($script:ManualRefreshState -ne 'idle') { Apply-ManualRefreshFeedback }
 })
+
+foreach ($control in @($script:DetailsForm, $script:ContentPanel, $script:QuotaRowsPanel)) {
+    Enable-DoubleBuffering $control
+}
 
 $script:Snapshot = Load-SnapshotCache
 Update-Theme
