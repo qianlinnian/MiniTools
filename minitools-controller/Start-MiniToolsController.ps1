@@ -35,6 +35,7 @@ $appDataPath = if($DataPath){[IO.Path]::GetFullPath($DataPath)}else{Join-Path $e
 $logPath = Join-Path $appDataPath 'controller.log'
 $runtimePath = Join-Path $appDataPath 'runtime.json'
 $showRequestPath = Join-Path $appDataPath 'show.request'
+$preferencesPath = Join-Path $appDataPath 'preferences.json'
 $script:desired = @{}
 $script:lastStart = @{}
 $script:rows = @{}
@@ -96,6 +97,56 @@ function Read-JsonFile([string]$Path) {
     try { return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json }
     catch { return $null }
 }
+
+function Write-TextAtomically([string]$Path, [string]$Content) {
+    $parent = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    $temporary = Join-Path $parent ('.{0}.{1}.tmp' -f (Split-Path -Leaf $Path), [guid]::NewGuid().ToString('N'))
+    try {
+        Set-Content -LiteralPath $temporary -Value $Content -Encoding UTF8 -NoNewline
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    } finally { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+}
+
+function Read-EnvFile([string]$Path) {
+    $values = @{}
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $values }
+    foreach ($line in Get-Content -LiteralPath $Path -Encoding UTF8) {
+        if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') {
+            $values[$matches[1]] = $matches[2].Trim().Trim('"').Trim("'")
+        }
+    }
+    return $values
+}
+
+function Update-EnvFile([string]$Path, [hashtable]$Updates) {
+    foreach ($value in $Updates.Values) {
+        if ($null -ne $value -and [string]$value -match '[\r\n]') { throw '配置值不能包含换行符。' }
+    }
+    $lines = if (Test-Path -LiteralPath $Path -PathType Leaf) { @(Get-Content -LiteralPath $Path -Encoding UTF8) } else { @() }
+    $written = @{}
+    $next = foreach ($line in $lines) {
+        if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=') {
+            $key = $matches[1]
+            if ($Updates.ContainsKey($key)) { $written[$key] = $true; '{0}={1}' -f $key, $Updates[$key]; continue }
+        }
+        $line
+    }
+    foreach ($key in $Updates.Keys) { if (-not $written.ContainsKey($key)) { $next += '{0}={1}' -f $key, $Updates[$key] } }
+    Write-TextAtomically $Path (($next -join [Environment]::NewLine) + [Environment]::NewLine)
+}
+
+function Get-ControllerPreferences {
+    $stored = Read-JsonFile $preferencesPath
+    $theme = if ($stored -and $stored.theme -in @('system','light','dark')) { [string]$stored.theme } else { 'system' }
+    return [pscustomobject]@{ theme=$theme }
+}
+
+function Save-ControllerPreferences {
+    Write-TextAtomically $preferencesPath (($script:preferences | ConvertTo-Json -Depth 3) + [Environment]::NewLine)
+}
+
+$script:preferences = Get-ControllerPreferences
 
 function Test-ToolProcess($Tool, $Runtime) {
     $tracked = $script:launched[$Tool.Id]
@@ -235,6 +286,7 @@ if ($SelfTest) {
 }
 
 function Get-SystemTheme {
+    if ($script:preferences.theme -in @('light','dark')) { return $script:preferences.theme }
     try {
         $setting = Get-ItemPropertyValue -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name 'AppsUseLightTheme' -ErrorAction Stop
         if ([int]$setting -eq 0) { return 'dark' }
@@ -269,6 +321,7 @@ function Set-SystemTheme([switch]$Force) {
     if ($form) {
         $form.BackColor=$ui.Canvas;$titleLabel.ForeColor=$ui.Text;$summaryLabel.ForeColor=$ui.Secondary;$eyebrowLabel.ForeColor=$ui.Secondary;$headerLine.BackColor=$ui.PanelBorder
         $openRoot.BackColor=$ui.Panel;$openRoot.ForeColor=$ui.Text;$openRoot.FlatAppearance.BorderColor=$ui.Border;$openRoot.FlatAppearance.MouseOverBackColor=$ui.Hover
+        if($settingsButton){$settingsButton.BackColor=$ui.Panel;$settingsButton.ForeColor=$ui.Text;$settingsButton.FlatAppearance.BorderColor=$ui.Border;$settingsButton.FlatAppearance.MouseOverBackColor=$ui.Hover}
         [void][MiniToolsWindowTheme]::DwmSetWindowAttribute($form.Handle,20,[ref]$darkMode,4)
         foreach($row in $script:rows.Values){$row.Name.ForeColor=$ui.Text;$row.Description.ForeColor=$ui.Secondary;$row.Panel.Invalidate()}
     }
@@ -336,6 +389,89 @@ function Update-AllStates {
     $summaryLabel.Text = ("{0} 个工具 · {1} 个运行 · {2} 个静态工具可用" -f $tools.Count,$runningCount,$availableCount)
 }
 
+function Add-SettingsField($Page, [string]$Caption, [int]$Y, [string]$Value='', [switch]$Secret) {
+    $label = New-Object Windows.Forms.Label
+    $label.Text=$Caption;$label.Location=New-Object Drawing.Point 24,$Y;$label.Size=New-Object Drawing.Size 165,24;$label.TextAlign=[Drawing.ContentAlignment]::MiddleLeft
+    $box = New-Object Windows.Forms.TextBox
+    $box.Text=$Value;$box.Location=New-Object Drawing.Point 195,$Y;$box.Size=New-Object Drawing.Size 440,25
+    if($Secret){$box.UseSystemPasswordChar=$true;$box.Enabled=$false}
+    $Page.Controls.AddRange(@($label,$box))
+    return [pscustomobject]@{Label=$label;Box=$box}
+}
+
+function Set-SettingsControlTheme($Control) {
+    $ui=$script:palette
+    if($Control -is [Windows.Forms.Label] -or $Control -is [Windows.Forms.CheckBox]){$Control.ForeColor=$ui.Text}
+    if($Control -is [Windows.Forms.TextBox] -or $Control -is [Windows.Forms.ComboBox]){$Control.BackColor=$ui.Panel;$Control.ForeColor=$ui.Text}
+    if($Control -is [Windows.Forms.Button]){$Control.BackColor=$ui.Panel;$Control.ForeColor=$ui.Text;$Control.FlatStyle=[Windows.Forms.FlatStyle]::Flat;$Control.FlatAppearance.BorderColor=$ui.Border;$Control.FlatAppearance.MouseOverBackColor=$ui.Hover}
+    if($Control -is [Windows.Forms.TabPage]){$Control.BackColor=$ui.Canvas;$Control.ForeColor=$ui.Text}
+    foreach($child in $Control.Controls){Set-SettingsControlTheme $child}
+}
+
+function Show-SettingsDialog {
+    $linkFeiTool = @($tools | Where-Object { $_.Id -eq 'linkfei' }) | Select-Object -First 1
+    if(-not $linkFeiTool){[Windows.Forms.MessageBox]::Show('没有找到 LinkFei 配置。','MiniTools 设置','OK','Error')|Out-Null;return}
+    $envPath=Join-Path $linkFeiTool.ToolPath '.env';$env=Read-EnvFile $envPath
+    $codexPath=Join-Path $linkFeiTool.ToolPath 'data\codex-remote.json';$codex=Read-JsonFile $codexPath
+    $projects=if($codex -and $codex.projects){$codex.projects}else{$null}
+    $currentRoot=if($projects -and $projects.PSObject.Properties['linkfei']){[string]$projects.linkfei}else{Split-Path -Parent $linkFeiTool.ToolPath}
+    $currentService=if($projects -and $projects.PSObject.Properties['linkfei-service']){[string]$projects.'linkfei-service'}else{$linkFeiTool.ToolPath}
+    $dialog=New-Object Windows.Forms.Form
+    $dialog.Text='MiniTools 设置';$dialog.Size=New-Object Drawing.Size 700,505;$dialog.MinimumSize=$dialog.Size;$dialog.MaximumSize=$dialog.Size;$dialog.StartPosition='CenterParent';$dialog.FormBorderStyle='FixedSingle';$dialog.MaximizeBox=$false;$dialog.ShowInTaskbar=$false;$dialog.BackColor=$script:palette.Canvas
+    if(Test-Path -LiteralPath $iconPath){$dialog.Icon=New-Object Drawing.Icon $iconPath}
+    $tabs=New-Object Windows.Forms.TabControl;$tabs.Location=New-Object Drawing.Point 18,18;$tabs.Size=New-Object Drawing.Size 648,365
+    $connectionPage=New-Object Windows.Forms.TabPage '连接与模型';$feishuPage=New-Object Windows.Forms.TabPage '飞书应用';$codexPage=New-Object Windows.Forms.TabPage 'Codex 远程控制';$appearancePage=New-Object Windows.Forms.TabPage '外观与运行'
+    $tabs.TabPages.AddRange(@($connectionPage,$feishuPage,$codexPage,$appearancePage))
+    $connectionPage.Controls.Add((New-Object Windows.Forms.Label -Property @{Text='修改后需重启 LinkFei 才会生效。密钥只有勾选替换后才会写入。';Location=(New-Object Drawing.Point 24,18);AutoSize=$true}))
+    $api=Add-SettingsField $connectionPage 'DeepSeek API Key' 54 '' -Secret
+    $replaceApi=New-Object Windows.Forms.CheckBox;$replaceApi.Text=if($env['DEEPSEEK_API_KEY'] -or $env['DEEPSEEK-KEY']){'替换已配置的 API Key'}else{'设置 API Key'};$replaceApi.Location=New-Object Drawing.Point 195,84;$replaceApi.AutoSize=$true;$replaceApi.Add_CheckedChanged({$api.Box.Enabled=$replaceApi.Checked}.GetNewClosure());$connectionPage.Controls.Add($replaceApi)
+    $base=Add-SettingsField $connectionPage 'Base URL' 116 (if($env['DEEPSEEK_BASE_URL']){$env['DEEPSEEK_BASE_URL']}else{'https://api.deepseek.com'})
+    $flash=Add-SettingsField $connectionPage 'Flash 模型' 154 (if($env['DEEPSEEK_MODEL_FLASH']){$env['DEEPSEEK_MODEL_FLASH']}else{'deepseek-v4-flash'})
+    $pro=Add-SettingsField $connectionPage 'Pro 模型' 192 (if($env['DEEPSEEK_MODEL_PRO']){$env['DEEPSEEK_MODEL_PRO']}else{'deepseek-v4-pro'})
+    $timeoutValue=if($env.ContainsKey('DEEPSEEK_TIMEOUT_MS')){[int]$env['DEEPSEEK_TIMEOUT_MS']}else{120000}
+    $timeout=Add-SettingsField $connectionPage '请求超时（秒）' 230 ([math]::Max(1,[math]::Round($timeoutValue/1000)))
+    $defaultLabel=New-Object Windows.Forms.Label;$defaultLabel.Text='默认模型';$defaultLabel.Location=New-Object Drawing.Point 24,270;$defaultLabel.Size=New-Object Drawing.Size 165,24
+    $defaultTier=New-Object Windows.Forms.ComboBox;$defaultTier.Location=New-Object Drawing.Point 195,268;$defaultTier.Size=New-Object Drawing.Size 160,25;$defaultTier.DropDownStyle='DropDownList';[void]$defaultTier.Items.AddRange(@('flash','pro'));$defaultTier.SelectedItem=if($env['BOT_MODEL'] -eq 'pro'){'pro'}else{'flash'};$connectionPage.Controls.AddRange(@($defaultLabel,$defaultTier))
+    $feishuPage.Controls.Add((New-Object Windows.Forms.Label -Property @{Text='App Secret 不会被读取回显；勾选后输入新值才会覆盖。';Location=(New-Object Drawing.Point 24,18);AutoSize=$true}))
+    $appId=Add-SettingsField $feishuPage '飞书 App ID' 54 $env['FEISHU_APP_ID']
+    $appSecret=Add-SettingsField $feishuPage '飞书 App Secret' 92 '' -Secret
+    $replaceSecret=New-Object Windows.Forms.CheckBox;$replaceSecret.Text=if($env['FEISHU_APP_SECRET']){'替换已配置的 App Secret'}else{'设置 App Secret'};$replaceSecret.Location=New-Object Drawing.Point 195,122;$replaceSecret.AutoSize=$true;$replaceSecret.Add_CheckedChanged({$appSecret.Box.Enabled=$replaceSecret.Checked}.GetNewClosure());$feishuPage.Controls.Add($replaceSecret)
+    $docBase=Add-SettingsField $feishuPage '文档链接前缀' 154 (if($env['FEISHU_DOC_BASE_URL']){$env['FEISHU_DOC_BASE_URL']}else{'https://feishu.cn/docx'})
+    $logLevelLabel=New-Object Windows.Forms.Label;$logLevelLabel.Text='日志级别';$logLevelLabel.Location=New-Object Drawing.Point 24,194;$logLevelLabel.Size=New-Object Drawing.Size 165,24
+    $logLevel=New-Object Windows.Forms.ComboBox;$logLevel.Location=New-Object Drawing.Point 195,192;$logLevel.Size=New-Object Drawing.Size 160,25;$logLevel.DropDownStyle='DropDownList';[void]$logLevel.Items.AddRange(@('info','warn','error'));$logLevel.SelectedItem=if($env['FEISHU_LOG_LEVEL'] -in @('info','warn','error')){$env['FEISHU_LOG_LEVEL']}else{'info'};$feishuPage.Controls.AddRange(@($logLevelLabel,$logLevel))
+    $codexEnabled=New-Object Windows.Forms.CheckBox;$codexEnabled.Text='启用飞书控制本机 Codex';$codexEnabled.Location=New-Object Drawing.Point 24,24;$codexEnabled.AutoSize=$true;$codexEnabled.Checked=[bool]($codex -and $codex.enabled);$codexPage.Controls.Add($codexEnabled)
+    $codexNote=New-Object Windows.Forms.Label;$codexNote.Text='授权的飞书私聊由本机初始化命令创建；这里不会显示或修改聊天身份。';$codexNote.Location=New-Object Drawing.Point 24,54;$codexNote.AutoSize=$true;$codexPage.Controls.Add($codexNote)
+    $rootProject=Add-SettingsField $codexPage 'MiniTools 项目目录' 94 $currentRoot
+    $serviceProject=Add-SettingsField $codexPage 'LinkFei 服务目录' 132 $currentService
+    $codexStatus=New-Object Windows.Forms.Label;$codexStatus.Location=New-Object Drawing.Point 24,176;$codexStatus.Size=New-Object Drawing.Size 590,40;$codexStatus.Text='目录只接受本机现有文件夹。Codex 登录由本机 Codex App 管理。';$codexPage.Controls.Add($codexStatus)
+    $checkCodex=New-Object Windows.Forms.Button;$checkCodex.Text='检查本机 Codex';$checkCodex.Location=New-Object Drawing.Point 24,230;$checkCodex.Size=New-Object Drawing.Size 130,30;$checkCodex.Add_Click({$available=[bool](Get-Command codex -ErrorAction SilentlyContinue);$pathsValid=(Test-Path -LiteralPath $rootProject.Box.Text -PathType Container) -and (Test-Path -LiteralPath $serviceProject.Box.Text -PathType Container);$codexStatus.Text=if($available -and $pathsValid){'Codex 命令和授权目录可用。'}else{'请确认已安装 Codex，且两个目录都存在。'}}.GetNewClosure());$codexPage.Controls.Add($checkCodex)
+    $themeLabel=New-Object Windows.Forms.Label;$themeLabel.Text='界面主题';$themeLabel.Location=New-Object Drawing.Point 24,30;$themeLabel.Size=New-Object Drawing.Size 165,24
+    $theme=New-Object Windows.Forms.ComboBox;$theme.Location=New-Object Drawing.Point 195,28;$theme.Size=New-Object Drawing.Size 180,25;$theme.DropDownStyle='DropDownList';[void]$theme.Items.AddRange(@('system','light','dark'));$theme.SelectedItem=$script:preferences.theme;$appearancePage.Controls.AddRange(@($themeLabel,$theme))
+    $appearanceNote=New-Object Windows.Forms.Label;$appearanceNote.Text='system 会跟随 Windows 的“应用模式”。保存后立即生效。';$appearanceNote.Location=New-Object Drawing.Point 195,60;$appearanceNote.AutoSize=$true;$appearancePage.Controls.Add($appearanceNote)
+    $save=New-Object Windows.Forms.Button;$save.Text='保存';$save.Location=New-Object Drawing.Point 370,405;$save.Size=New-Object Drawing.Size 90,32
+    $saveRestart=New-Object Windows.Forms.Button;$saveRestart.Text='保存并重启 LinkFei';$saveRestart.Location=New-Object Drawing.Point 468,405;$saveRestart.Size=New-Object Drawing.Size 145,32
+    $cancel=New-Object Windows.Forms.Button;$cancel.Text='取消';$cancel.Location=New-Object Drawing.Point 576,445;$cancel.Size=New-Object Drawing.Size 90,28;$cancel.DialogResult=[Windows.Forms.DialogResult]::Cancel
+    $saveChanges={param([bool]$Restart)
+        try {
+            $baseUrl=$base.Box.Text.Trim().TrimEnd('/');$uri=$null;if(-not[uri]::TryCreate($baseUrl,[System.UriKind]::Absolute,[ref]$uri)){throw 'DeepSeek Base URL 不是有效的完整地址。'}
+            $timeoutSeconds=0;if(-not[int]::TryParse($timeout.Box.Text.Trim(),[ref]$timeoutSeconds) -or $timeoutSeconds -lt 1 -or $timeoutSeconds -gt 600){throw '请求超时应在 1 到 600 秒之间。'}
+            if($replaceApi.Checked -and [string]::IsNullOrWhiteSpace($api.Box.Text)){throw '请填写新的 DeepSeek API Key，或取消“替换”勾选。'}
+            if($replaceSecret.Checked -and [string]::IsNullOrWhiteSpace($appSecret.Box.Text)){throw '请填写新的飞书 App Secret，或取消“替换”勾选。'}
+            $updates=@{DEEPSEEK_BASE_URL=$baseUrl;DEEPSEEK_MODEL_FLASH=$flash.Box.Text.Trim();DEEPSEEK_MODEL_PRO=$pro.Box.Text.Trim();DEEPSEEK_TIMEOUT_MS=($timeoutSeconds*1000);BOT_MODEL=[string]$defaultTier.SelectedItem;FEISHU_APP_ID=$appId.Box.Text.Trim();FEISHU_DOC_BASE_URL=$docBase.Box.Text.Trim().TrimEnd('/');FEISHU_LOG_LEVEL=[string]$logLevel.SelectedItem}
+            if($replaceApi.Checked){$updates.DEEPSEEK_API_KEY=$api.Box.Text.Trim()};if($replaceSecret.Checked){$updates.FEISHU_APP_SECRET=$appSecret.Box.Text.Trim()}
+            if($updates.DEEPSEEK_MODEL_FLASH.Length -eq 0 -or $updates.DEEPSEEK_MODEL_PRO.Length -eq 0){throw '两个模型名称都不能为空。'}
+            foreach($path in @($rootProject.Box.Text.Trim(),$serviceProject.Box.Text.Trim())){if(-not(Test-Path -LiteralPath $path -PathType Container)){throw "项目目录不存在：$path"}}
+            Update-EnvFile $envPath $updates
+            $remote=[ordered]@{};if($codex){foreach($property in $codex.PSObject.Properties){if($property.Name -notin @('enabled','projects')){$remote[$property.Name]=$property.Value}}};$remote.enabled=[bool]$codexEnabled.Checked;$remote.projects=[ordered]@{linkfei=[IO.Path]::GetFullPath($rootProject.Box.Text.Trim());'linkfei-service'=[IO.Path]::GetFullPath($serviceProject.Box.Text.Trim())};Write-TextAtomically $codexPath (($remote|ConvertTo-Json -Depth 8)+[Environment]::NewLine)
+            $script:preferences=[pscustomobject]@{theme=[string]$theme.SelectedItem};Save-ControllerPreferences;[void](Set-SystemTheme -Force);Update-AllStates
+            if($Restart){$script:desired[$linkFeiTool.Id]=$false;[void](Stop-ManagedTool $linkFeiTool -Quiet);$script:desired[$linkFeiTool.Id]=$true;[void](Start-ManagedTool $linkFeiTool -Quiet);Update-AllStates}
+            [Windows.Forms.MessageBox]::Show((if($Restart){'设置已保存，LinkFei 正在重启。'}else{'设置已保存。LinkFei 重启后生效。'}),'MiniTools 设置','OK','Information')|Out-Null;$dialog.Close()
+        } catch {[Windows.Forms.MessageBox]::Show($_.Exception.Message,'无法保存设置','OK','Error')|Out-Null}
+    }.GetNewClosure()
+    $save.Add_Click({& $saveChanges $false}.GetNewClosure());$saveRestart.Add_Click({& $saveChanges $true}.GetNewClosure())
+    $dialog.Controls.AddRange(@($tabs,$save,$saveRestart,$cancel));Set-SettingsControlTheme $dialog;$dialog.AcceptButton=$save;$dialog.CancelButton=$cancel;[void]$dialog.ShowDialog($form)
+}
+
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'MiniTools 控制中心'
 $form.Size = New-Object Drawing.Size 730, (202 + 112 * $tools.Count)
@@ -371,7 +507,9 @@ $headerLine = New-Object Windows.Forms.Panel
 $headerLine.Location = New-Object Drawing.Point 24,78
 $headerLine.Size = New-Object Drawing.Size 665,1
 $headerLine.BackColor = [Drawing.Color]::FromArgb(218,218,214)
-$form.Controls.AddRange(@($titleLabel,$summaryLabel,$eyebrowLabel,$headerLine))
+$settingsButton=New-Object Windows.Forms.Button
+$settingsButton.Text='设置';$settingsButton.Location=New-Object Drawing.Point 574,46;$settingsButton.Size=New-Object Drawing.Size 115,26;$settingsButton.FlatStyle=[Windows.Forms.FlatStyle]::Flat;$settingsButton.FlatAppearance.BorderColor=[Drawing.Color]::FromArgb(191,191,187);$settingsButton.FlatAppearance.MouseOverBackColor=[Drawing.Color]::FromArgb(238,238,235);$settingsButton.BackColor=[Drawing.Color]::White;$settingsButton.ForeColor=[Drawing.Color]::FromArgb(24,24,24);$settingsButton.UseVisualStyleBackColor=$false;$settingsButton.TabStop=$false
+$form.Controls.AddRange(@($titleLabel,$summaryLabel,$eyebrowLabel,$settingsButton,$headerLine))
 
 $y = 96
 foreach ($tool in $tools) {
@@ -458,6 +596,7 @@ $notifyIcon.Visible = $true
 Write-ControllerLog '主窗体和托盘图标已创建。'
 $openCenterItem.Add_Click({$form.Show();$form.Activate()})
 $notifyIcon.Add_DoubleClick({$form.Show();$form.Activate()})
+$settingsButton.Add_Click({Show-SettingsDialog})
 $exitKeep.Add_Click({$script:exiting=$true;[Windows.Forms.Application]::Exit()})
 $stopExit.Add_Click({foreach($tool in $tools){[void](Stop-ManagedTool $tool -Quiet)};$script:exiting=$true;[Windows.Forms.Application]::Exit()})
 $form.Add_FormClosing({param($sender,$eventArgs);if(-not $script:exiting -and $eventArgs.CloseReason -eq [Windows.Forms.CloseReason]::UserClosing){$eventArgs.Cancel=$true;$form.Hide()}})

@@ -29,3 +29,9 @@ powershell.exe -ExecutionPolicy Bypass -File .\Install.ps1
 启动改为异步检查，不再阻塞窗口等待十秒。存活但未就绪的进程以黄色状态显示，不会重复启动；失败后按 15、30、60、120、240 秒退避，连续五次启动未能稳定运行则暂停恢复，点击“启动”重新尝试。服务健康持续 60 秒后清零失败次数。主动停止会关闭当前控制器会话内的自动恢复。卡片显示启动错误和重试倒计时。
 
 运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-Recovery.ps1` 可验证恢复策略，不会启动或停止实际工具。
+
+## 设置中心
+
+主窗口右上角的“设置”用于维护 LinkFei 的本机配置：DeepSeek 的 API Key、地址、模型与超时，飞书 App ID、App Secret 与日志级别，以及飞书控制 Codex 的开关和两个授权项目目录。密钥不会被界面回显；只有勾选“替换”并填写新值才会覆盖已有密钥。
+
+设置会以原子替换方式保存到 LinkFei 的 `.env` 和 `data/codex-remote.json`，不会写入 Git。选择“保存并重启 LinkFei”会通过控制中心平滑重启服务；单独保存则在下次重启 LinkFei 时生效。外观页可选择跟随 Windows、固定浅色或固定深色，偏好保存在当前用户的 MiniTools 控制器目录。
