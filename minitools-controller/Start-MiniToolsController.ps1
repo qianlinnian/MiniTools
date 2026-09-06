@@ -14,6 +14,17 @@ public static class MiniToolsTaskbarIdentity
 }
 '@
 }
+if(-not ('MiniToolsWindowTheme' -as [type])){
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class MiniToolsWindowTheme
+{
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int valueSize);
+}
+'@
+}
 [void][MiniToolsTaskbarIdentity]::SetCurrentProcessExplicitAppUserModelID('MiniTools.Controller')
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
@@ -27,6 +38,8 @@ $showRequestPath = Join-Path $appDataPath 'show.request'
 $script:desired = @{}
 $script:lastStart = @{}
 $script:rows = @{}
+$script:recovery = @{}
+$script:launched = @{}
 $script:exiting = $false
 
 if (-not (Test-Path -LiteralPath $appDataPath)) { New-Item -ItemType Directory -Path $appDataPath -Force | Out-Null }
@@ -75,6 +88,7 @@ Write-ControllerLog ("已加载 {0} 个工具配置。" -f $tools.Count)
 foreach ($tool in $tools) {
     $script:desired[$tool.Id] = (-not $NoStart) -and $tool.AutoStart
     $script:lastStart[$tool.Id] = [datetime]::MinValue
+    $script:recovery[$tool.Id] = @{ Attempts=0; Next=[datetime]::MinValue; HealthySince=$null; Paused=$false; LastError=$null }
 }
 
 function Read-JsonFile([string]$Path) {
@@ -83,20 +97,30 @@ function Read-JsonFile([string]$Path) {
     catch { return $null }
 }
 
+function Test-ToolProcess($Tool, $Runtime) {
+    $tracked = $script:launched[$Tool.Id]
+    if ($tracked -and -not $tracked.HasExited) { return $true }
+    if ($Runtime.pid) {
+        $candidate = Get-Process -Id ([int]$Runtime.pid) -ErrorAction SilentlyContinue
+        if ($candidate) { return $true }
+    }
+    return $false
+}
+
 function Get-ToolState($Tool) {
     $runtime = Read-JsonFile $Tool.RuntimePath
     if ($Tool.Kind -eq 'http-runtime') {
-        if (-not $runtime.port -or -not $runtime.token) { return [pscustomobject]@{ Running=$false; Detail='已停止'; Runtime=$runtime } }
+        if (-not $runtime.port -or -not $runtime.token) { $alive=Test-ToolProcess $Tool $runtime; return [pscustomobject]@{ Running=$alive; Healthy=$false; Detail=if($alive){'启动中/未就绪'}else{'已停止'}; Runtime=$runtime } }
         try {
             $headers = @{ Authorization = 'Bearer {0}' -f $runtime.token }
             $health = Invoke-RestMethod -Uri ('http://127.0.0.1:{0}/health' -f $runtime.port) -Headers $headers -Method Get -TimeoutSec 2
-            return [pscustomobject]@{ Running=[bool]$health.ok; Detail=if($health.state -eq 'connected'){'已连接'}else{[string]$health.state}; Runtime=$runtime; Health=$health }
-        } catch { return [pscustomobject]@{ Running=$false; Detail='无响应'; Runtime=$runtime } }
+            return [pscustomobject]@{ Running=$true; Healthy=([bool]$health.ok -and $health.state -eq 'connected'); Detail=if($health.state -eq 'connected'){'已连接'}else{[string]$health.state}; Runtime=$runtime; Health=$health }
+        } catch { $alive=Test-ToolProcess $Tool $runtime; return [pscustomobject]@{ Running=$alive; Healthy=$false; Detail=if($alive){'进程存活/无响应'}else{'已停止'}; Runtime=$runtime } }
     }
     if ($Tool.Kind -eq 'managed-process') {
-        if (-not $runtime.pid) { return [pscustomobject]@{ Running=$false; Detail='已停止'; Runtime=$runtime } }
+        if (-not $runtime.pid) { $alive=Test-ToolProcess $Tool $runtime; return [pscustomobject]@{ Running=$alive; Healthy=$false; Detail=if($alive){'启动中/未就绪'}else{'已停止'}; Runtime=$runtime } }
         $process = Get-Process -Id ([int]$runtime.pid) -ErrorAction SilentlyContinue
-        return [pscustomobject]@{ Running=[bool]$process; Detail=if($process){'运行中'}else{'进程已退出'}; Runtime=$runtime }
+        return [pscustomobject]@{ Running=[bool]$process; Healthy=[bool]$process; Detail=if($process){'运行中'}else{'进程已退出'}; Runtime=$runtime }
     }
     if ($Tool.Kind -eq 'static-tool') {
         $available = Test-Path -LiteralPath $Tool.ToolPath -PathType Container
@@ -120,8 +144,15 @@ function Quote-Argument([string]$Value) {
 }
 
 function Start-ManagedTool($Tool, [switch]$Quiet) {
+    $recovery = $script:recovery[$Tool.Id]
+    if (-not $Quiet) { $recovery.Attempts=0; $recovery.Paused=$false; $recovery.LastError=$null }
+
     if ((Get-ToolState $Tool).Running) { return $true }
     $script:lastStart[$Tool.Id] = Get-Date
+    $recovery.Attempts++
+    $recovery.HealthySince=$null
+    $recovery.Next=(Get-Date).AddSeconds([math]::Min(300,15*[math]::Pow(2,$recovery.Attempts-1)))
+    $recovery.Paused=$recovery.Attempts -ge 5
     foreach ($stale in @($Tool.RuntimePath, $Tool.StopRequestPath, $Tool.ShowRequestPath)) {
         if ($stale -and (Test-Path -LiteralPath $stale)) { Remove-Item -LiteralPath $stale -Force }
     }
@@ -144,14 +175,12 @@ function Start-ManagedTool($Tool, [switch]$Quiet) {
             $parameters.RedirectStandardError = Join-Path $Tool.LogsDirectory "$($Tool.Id)-$stamp.err.log"
         }
         $process = Start-Process @parameters
+        $script:launched[$Tool.Id] = $process
         Write-ControllerLog "启动 $($Tool.Id)，PID $($process.Id)。"
-        for ($attempt=0; $attempt -lt 20; $attempt++) {
-            Start-Sleep -Milliseconds 500
-            if ((Get-ToolState $Tool).Running) { return $true }
-            if ($process.HasExited) { break }
-        }
-        throw "$($Tool.Name) 未能在 10 秒内就绪。"
+        # Readiness is checked by the timer, so a slow startup never blocks the UI.
+        return $true
     } catch {
+        $recovery.LastError=$_.Exception.Message
         Write-ControllerLog "启动 $($Tool.Id) 失败：$($_.Exception.Message)"
         if (-not $Quiet) { [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'MiniTools 控制中心', 'OK', 'Error') | Out-Null }
         return $false
@@ -160,6 +189,7 @@ function Start-ManagedTool($Tool, [switch]$Quiet) {
 
 function Stop-ManagedTool($Tool, [switch]$Quiet) {
     $script:desired[$Tool.Id] = $false
+    Write-ControllerLog "用户停止 $($Tool.Id)，自动恢复已关闭。"
     $state = Get-ToolState $Tool
     if (-not $state.Running) { return $true }
     try {
@@ -204,39 +234,101 @@ if ($SelfTest) {
     exit 0
 }
 
+function Get-SystemTheme {
+    try {
+        $setting = Get-ItemPropertyValue -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name 'AppsUseLightTheme' -ErrorAction Stop
+        if ([int]$setting -eq 0) { return 'dark' }
+    } catch { }
+    return 'light'
+}
+
+$script:currentTheme = $null
+$script:palette = $null
+function Set-SystemTheme([switch]$Force) {
+    $theme = Get-SystemTheme
+    if (-not $Force -and $script:currentTheme -eq $theme) { return $false }
+    $script:currentTheme = $theme
+    if ($theme -eq 'dark') {
+        $script:palette = [pscustomobject]@{
+            Canvas=[Drawing.Color]::FromArgb(11,11,11); Panel=[Drawing.Color]::FromArgb(20,20,20); Text=[Drawing.Color]::FromArgb(238,238,238)
+            Secondary=[Drawing.Color]::FromArgb(145,145,145); Border=[Drawing.Color]::FromArgb(70,70,70); PanelBorder=[Drawing.Color]::FromArgb(46,46,46)
+            Hover=[Drawing.Color]::FromArgb(42,42,42); Inactive=[Drawing.Color]::FromArgb(88,88,88); AccentInactive=[Drawing.Color]::FromArgb(98,98,98)
+            PrimaryBackground=[Drawing.Color]::FromArgb(238,238,238); PrimaryText=[Drawing.Color]::FromArgb(12,12,12); PrimaryHover=[Drawing.Color]::FromArgb(205,205,205)
+        }
+        $darkMode = 1
+    } else {
+        $script:palette = [pscustomobject]@{
+            Canvas=[Drawing.Color]::FromArgb(246,246,243); Panel=[Drawing.Color]::White; Text=[Drawing.Color]::FromArgb(24,24,24)
+            Secondary=[Drawing.Color]::FromArgb(98,98,98); Border=[Drawing.Color]::FromArgb(191,191,187); PanelBorder=[Drawing.Color]::FromArgb(218,218,214)
+            Hover=[Drawing.Color]::FromArgb(238,238,235); Inactive=[Drawing.Color]::FromArgb(148,148,148); AccentInactive=[Drawing.Color]::FromArgb(142,142,138)
+            PrimaryBackground=[Drawing.Color]::FromArgb(24,24,24); PrimaryText=[Drawing.Color]::FromArgb(248,248,248); PrimaryHover=[Drawing.Color]::FromArgb(62,62,62)
+        }
+        $darkMode = 0
+    }
+    $ui = $script:palette
+    if ($form) {
+        $form.BackColor=$ui.Canvas;$titleLabel.ForeColor=$ui.Text;$summaryLabel.ForeColor=$ui.Secondary;$eyebrowLabel.ForeColor=$ui.Secondary;$headerLine.BackColor=$ui.PanelBorder
+        $openRoot.BackColor=$ui.Panel;$openRoot.ForeColor=$ui.Text;$openRoot.FlatAppearance.BorderColor=$ui.Border;$openRoot.FlatAppearance.MouseOverBackColor=$ui.Hover
+        [void][MiniToolsWindowTheme]::DwmSetWindowAttribute($form.Handle,20,[ref]$darkMode,4)
+        foreach($row in $script:rows.Values){$row.Name.ForeColor=$ui.Text;$row.Description.ForeColor=$ui.Secondary;$row.Panel.Invalidate()}
+    }
+    return $true
+}
+
 function Update-AllStates {
     $runningCount = 0
     $availableCount = 0
     foreach ($tool in $tools) {
         $state = Get-ToolState $tool
+        $recovery = $script:recovery[$tool.Id]
+        if ($state.Running -and $state.Healthy) {
+            if (-not $recovery.HealthySince) { $recovery.HealthySince=Get-Date }
+            if (((Get-Date)-$recovery.HealthySince).TotalSeconds -ge 60) { $recovery.Attempts=0; $recovery.Paused=$false; $recovery.LastError=$null }
+        } else { $recovery.HealthySince=$null }
+        if (-not $state.Running -and $script:desired[$tool.Id] -and $tool.RestartOnFailure) {
+            if ($recovery.Paused) { $state.Detail='恢复暂停/请启动' }
+            else { $state.Detail='重试 {0}s ({1}/5)' -f [math]::Max(0,[math]::Ceiling(($recovery.Next-(Get-Date)).TotalSeconds)), $recovery.Attempts }
+        }
         if ($state.Running) { $runningCount++ }
         if ($tool.Kind -eq 'static-tool' -and $state.Available) { $availableCount++ }
         $row = $script:rows[$tool.Id]
         if ($row) {
             $healthy = $state.Running -or ($tool.Kind -eq 'static-tool' -and $state.Available)
+            $row.Description.Text = if($recovery.LastError){$recovery.LastError}else{$tool.Description}
             $row.Status.Text = if($healthy){'●  ' + $state.Detail}else{'○  ' + $state.Detail}
-            $row.Start.Enabled = ($tool.Kind -ne 'static-tool') -and (-not $state.Running)
-            $row.Stop.Enabled = ($tool.Kind -ne 'static-tool') -and $state.Running
-            $mutedBackground=[Drawing.Color]::FromArgb(243,244,246);$mutedForeground=[Drawing.Color]::FromArgb(156,163,175);$mutedBorder=[Drawing.Color]::FromArgb(209,213,219)
-            $row.Open.BackColor=[Drawing.Color]::White;$row.Open.ForeColor=[Drawing.Color]::FromArgb(31,41,55);$row.Open.FlatAppearance.BorderColor=[Drawing.Color]::FromArgb(75,85,99)
-            if($state.Running){
-                $row.Panel.BackColor=[Drawing.Color]::FromArgb(240,253,244);$row.Accent.BackColor=[Drawing.Color]::FromArgb(22,163,74)
-                $row.Status.BackColor=[Drawing.Color]::FromArgb(22,163,74);$row.Status.ForeColor=[Drawing.Color]::White
-                $row.Start.BackColor=$mutedBackground;$row.Start.ForeColor=$mutedForeground;$row.Start.FlatAppearance.BorderColor=$mutedBorder
-                $row.Stop.BackColor=[Drawing.Color]::FromArgb(220,38,38);$row.Stop.ForeColor=[Drawing.Color]::White;$row.Stop.FlatAppearance.BorderColor=[Drawing.Color]::FromArgb(220,38,38)
-            }elseif($tool.Kind -eq 'static-tool' -and $state.Available){
-                $row.Panel.BackColor=[Drawing.Color]::FromArgb(239,246,255);$row.Accent.BackColor=[Drawing.Color]::FromArgb(37,99,235)
-                $row.Status.BackColor=[Drawing.Color]::FromArgb(37,99,235);$row.Status.ForeColor=[Drawing.Color]::White
-                foreach($button in @($row.Start,$row.Stop)){$button.BackColor=$mutedBackground;$button.ForeColor=$mutedForeground;$button.FlatAppearance.BorderColor=$mutedBorder}
-                $row.Open.BackColor=[Drawing.Color]::FromArgb(37,99,235);$row.Open.ForeColor=[Drawing.Color]::White;$row.Open.FlatAppearance.BorderColor=[Drawing.Color]::FromArgb(37,99,235)
-            }else{
-                $row.Panel.BackColor=[Drawing.Color]::White;$row.Accent.BackColor=[Drawing.Color]::FromArgb(156,163,175)
-                $row.Status.BackColor=[Drawing.Color]::FromArgb(229,231,235);$row.Status.ForeColor=[Drawing.Color]::FromArgb(75,85,99)
-                $row.Start.BackColor=[Drawing.Color]::FromArgb(22,163,74);$row.Start.ForeColor=[Drawing.Color]::White;$row.Start.FlatAppearance.BorderColor=[Drawing.Color]::FromArgb(22,163,74)
-                $row.Stop.BackColor=$mutedBackground;$row.Stop.ForeColor=$mutedForeground;$row.Stop.FlatAppearance.BorderColor=$mutedBorder
+            $canStart = ($tool.Kind -ne 'static-tool') -and (-not $state.Running)
+            $canStop = ($tool.Kind -ne 'static-tool') -and $state.Running
+            # Keep inactive controls legible on a dark surface; the click handlers below are state-guarded.
+            $row.Start.Enabled = $true
+            $row.Stop.Enabled = $true
+            # The surface always stays monochrome. Colour is reserved for a state that needs attention.
+            $ui=$script:palette;$panelBackground=$ui.Panel;$buttonBackground=$ui.Panel
+            $text=$ui.Text;$secondary=$ui.Secondary;$border=$ui.Border
+            $row.Panel.BackColor=$panelBackground
+            foreach($button in @($row.Start,$row.Stop,$row.Open)){
+                $button.BackColor=$buttonBackground;$button.ForeColor=$text;$button.FlatAppearance.BorderColor=$border
+                $button.FlatAppearance.MouseOverBackColor=$ui.Hover
             }
+            $row.Status.BackColor=$panelBackground;$row.Status.ForeColor=$secondary
+            $row.Accent.BackColor=$ui.AccentInactive
+            if($state.Running -and $state.Healthy){
+                $row.Status.ForeColor=$text;$row.Accent.BackColor=$ui.Text
+            }elseif($tool.Kind -eq 'static-tool' -and $state.Available){
+                $row.Status.ForeColor=$text;$row.Accent.BackColor=$ui.Border
+            }elseif($state.Running){
+                $row.Status.ForeColor=[Drawing.Color]::FromArgb(222,184,92);$row.Accent.BackColor=[Drawing.Color]::FromArgb(222,184,92)
+            }
+            if($recovery.LastError){
+                $row.Status.ForeColor=[Drawing.Color]::FromArgb(225,103,103);$row.Accent.BackColor=[Drawing.Color]::FromArgb(225,103,103)
+            }
+            if($canStart){
+                $row.Start.BackColor=$ui.PrimaryBackground;$row.Start.ForeColor=$ui.PrimaryText;$row.Start.FlatAppearance.BorderColor=$ui.PrimaryBackground
+                $row.Start.FlatAppearance.MouseOverBackColor=$ui.PrimaryHover
+                $row.Start.Cursor=[Windows.Forms.Cursors]::Hand
+            }else{$row.Start.ForeColor=$ui.Inactive;$row.Start.FlatAppearance.BorderColor=$ui.PanelBorder;$row.Start.Cursor=[Windows.Forms.Cursors]::Default}
+            if($canStop){$row.Stop.Cursor=[Windows.Forms.Cursors]::Hand}else{$row.Stop.ForeColor=$ui.Inactive;$row.Stop.FlatAppearance.BorderColor=$ui.PanelBorder;$row.Stop.Cursor=[Windows.Forms.Cursors]::Default}
         }
-        if (-not $state.Running -and $script:desired[$tool.Id] -and $tool.RestartOnFailure -and ((Get-Date)-$script:lastStart[$tool.Id]).TotalSeconds -ge 15) {
+        if (-not $state.Running -and $script:desired[$tool.Id] -and $tool.RestartOnFailure -and -not $recovery.Paused -and (Get-Date) -ge $recovery.Next) {
             [void](Start-ManagedTool $tool -Quiet)
         }
     }
@@ -246,74 +338,88 @@ function Update-AllStates {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'MiniTools 控制中心'
-$form.Size = New-Object Drawing.Size 700, (190 + 112 * $tools.Count)
+$form.Size = New-Object Drawing.Size 730, (202 + 112 * $tools.Count)
 $form.MinimumSize = $form.Size
 $form.MaximumSize = $form.Size
 $form.StartPosition = 'CenterScreen'
-$form.BackColor = [Drawing.Color]::FromArgb(245,247,251)
+$form.BackColor = [Drawing.Color]::FromArgb(246,246,243)
 $form.Font = New-Object Drawing.Font 'Microsoft YaHei UI', 9
 $form.ShowInTaskbar = $true
 $form.FormBorderStyle = [Windows.Forms.FormBorderStyle]::FixedSingle
 $form.MaximizeBox = $false
 if (Test-Path -LiteralPath $iconPath) { $form.Icon = New-Object Drawing.Icon $iconPath }
+$form.Add_Shown({Set-SystemTheme -Force;Update-AllStates})
 
 $titleLabel = New-Object Windows.Forms.Label
 $titleLabel.Text = 'MiniTools 控制中心'
-$titleLabel.Font = New-Object Drawing.Font 'Microsoft YaHei UI', 18, ([Drawing.FontStyle]::Bold)
+$titleLabel.Font = New-Object Drawing.Font 'Microsoft YaHei UI', 16, ([Drawing.FontStyle]::Bold)
 $titleLabel.Location = New-Object Drawing.Point 24,20
 $titleLabel.AutoSize = $true
+$titleLabel.ForeColor = [Drawing.Color]::FromArgb(24,24,24)
 $summaryLabel = New-Object Windows.Forms.Label
-$summaryLabel.Text = '正在检查工具状态…'
-$summaryLabel.ForeColor = [Drawing.Color]::FromArgb(100,108,125)
-$summaryLabel.Location = New-Object Drawing.Point 28,58
+$summaryLabel.Text = '正在检查本机服务…'
+$summaryLabel.ForeColor = [Drawing.Color]::FromArgb(98,98,98)
+$summaryLabel.Location = New-Object Drawing.Point 26,53
 $summaryLabel.AutoSize = $true
-$form.Controls.AddRange(@($titleLabel,$summaryLabel))
+$eyebrowLabel = New-Object Windows.Forms.Label
+$eyebrowLabel.Text = 'LOCAL TOOL ORCHESTRATOR'
+$eyebrowLabel.Font = New-Object Drawing.Font 'Consolas',8
+$eyebrowLabel.ForeColor = [Drawing.Color]::FromArgb(98,98,98)
+$eyebrowLabel.Location = New-Object Drawing.Point 505,25
+$eyebrowLabel.AutoSize = $true
+$headerLine = New-Object Windows.Forms.Panel
+$headerLine.Location = New-Object Drawing.Point 24,78
+$headerLine.Size = New-Object Drawing.Size 665,1
+$headerLine.BackColor = [Drawing.Color]::FromArgb(218,218,214)
+$form.Controls.AddRange(@($titleLabel,$summaryLabel,$eyebrowLabel,$headerLine))
 
-$y = 92
+$y = 96
 foreach ($tool in $tools) {
     $panel = New-Object Windows.Forms.Panel
     $panel.Location = New-Object Drawing.Point 24,$y
-    $panel.Size = New-Object Drawing.Size 635,94
+    $panel.Size = New-Object Drawing.Size 665,94
     $panel.BackColor = [Drawing.Color]::White
-    $panel.BorderStyle = [Windows.Forms.BorderStyle]::FixedSingle
+    $panel.Add_Paint({param($sender,$eventArgs);$pen=New-Object Drawing.Pen $script:palette.PanelBorder;$eventArgs.Graphics.DrawRectangle($pen,0,0,$sender.ClientSize.Width-1,$sender.ClientSize.Height-1);$pen.Dispose()})
     $accent = New-Object Windows.Forms.Panel
     $accent.Location = New-Object Drawing.Point 0,0
-    $accent.Size = New-Object Drawing.Size 6,92
-    $accent.BackColor = [Drawing.Color]::FromArgb(156,163,175)
+    $accent.Size = New-Object Drawing.Size 2,92
+    $accent.BackColor = [Drawing.Color]::FromArgb(142,142,138)
     $name = New-Object Windows.Forms.Label
     $name.Text = $tool.Name
     $name.Font = New-Object Drawing.Font 'Microsoft YaHei UI',11,([Drawing.FontStyle]::Bold)
     $name.Location = New-Object Drawing.Point 22,12
     $name.AutoSize = $true
+    $name.ForeColor = [Drawing.Color]::FromArgb(24,24,24)
     $description = New-Object Windows.Forms.Label
     $description.Text = $tool.Description
-    $description.ForeColor = [Drawing.Color]::FromArgb(100,108,125)
+    $description.ForeColor = [Drawing.Color]::FromArgb(98,98,98)
     $description.Location = New-Object Drawing.Point 22,42
     $description.Size = New-Object Drawing.Size 300,38
     $status = New-Object Windows.Forms.Label
     $status.Text = '检查中…'
-    $status.Location = New-Object Drawing.Point 330,16
-    $status.Size = New-Object Drawing.Size 120,26
-    $status.TextAlign = [Drawing.ContentAlignment]::MiddleCenter
-    $status.Font = New-Object Drawing.Font 'Microsoft YaHei UI',9,([Drawing.FontStyle]::Bold)
+    $status.Location = New-Object Drawing.Point 350,14
+    $status.Size = New-Object Drawing.Size 286,26
+    $status.TextAlign = [Drawing.ContentAlignment]::MiddleRight
+    $status.Font = New-Object Drawing.Font 'Consolas',9
+    $status.ForeColor = [Drawing.Color]::FromArgb(98,98,98)
     $start = New-Object Windows.Forms.Button
-    $start.Text = '启动'; $start.Location = New-Object Drawing.Point 330,48; $start.Size = New-Object Drawing.Size 82,30
+    $start.Text = '启动'; $start.Location = New-Object Drawing.Point 380,48; $start.Size = New-Object Drawing.Size 82,30
     $stop = New-Object Windows.Forms.Button
-    $stop.Text = '停止'; $stop.Location = New-Object Drawing.Point 420,48; $stop.Size = New-Object Drawing.Size 82,30
+    $stop.Text = '停止'; $stop.Location = New-Object Drawing.Point 470,48; $stop.Size = New-Object Drawing.Size 82,30
     $open = New-Object Windows.Forms.Button
-    $open.Text = '打开'; $open.Location = New-Object Drawing.Point 510,48; $open.Size = New-Object Drawing.Size 82,30
+    $open.Text = '打开'; $open.Location = New-Object Drawing.Point 560,48; $open.Size = New-Object Drawing.Size 82,30
     if($tool.Kind -eq 'static-tool'){$start.Text='—';$stop.Text='—'}
-    foreach($button in @($start,$stop,$open)){$button.FlatStyle=[Windows.Forms.FlatStyle]::Flat;$button.FlatAppearance.BorderSize=1;$button.FlatAppearance.BorderColor=[Drawing.Color]::Black;$button.Cursor=[Windows.Forms.Cursors]::Hand;$button.TabStop=$false;$button.Add_MouseUp({$form.ActiveControl=$null})}
-    $start.BackColor=[Drawing.Color]::White;$start.ForeColor=[Drawing.Color]::Black;$start.UseVisualStyleBackColor=$false
-    $stop.BackColor=[Drawing.Color]::White;$stop.ForeColor=[Drawing.Color]::Black;$stop.UseVisualStyleBackColor=$false
-    $open.BackColor=[Drawing.Color]::White;$open.ForeColor=[Drawing.Color]::Black;$open.UseVisualStyleBackColor=$false
+    foreach($button in @($start,$stop,$open)){$button.FlatStyle=[Windows.Forms.FlatStyle]::Flat;$button.FlatAppearance.BorderSize=1;$button.FlatAppearance.BorderColor=[Drawing.Color]::FromArgb(191,191,187);$button.FlatAppearance.MouseOverBackColor=[Drawing.Color]::FromArgb(238,238,235);$button.Cursor=[Windows.Forms.Cursors]::Hand;$button.TabStop=$false;$button.Add_MouseUp({$form.ActiveControl=$null})}
+    $start.BackColor=[Drawing.Color]::White;$start.ForeColor=[Drawing.Color]::FromArgb(24,24,24);$start.UseVisualStyleBackColor=$false
+    $stop.BackColor=[Drawing.Color]::White;$stop.ForeColor=[Drawing.Color]::FromArgb(24,24,24);$stop.UseVisualStyleBackColor=$false
+    $open.BackColor=[Drawing.Color]::White;$open.ForeColor=[Drawing.Color]::FromArgb(24,24,24);$open.UseVisualStyleBackColor=$false
     $capturedTool = $tool
-    $start.Add_Click({ $script:desired[$capturedTool.Id]=$true; [void](Start-ManagedTool $capturedTool); Update-AllStates }.GetNewClosure())
-    $stop.Add_Click({ [void](Stop-ManagedTool $capturedTool); Update-AllStates }.GetNewClosure())
+    $start.Add_Click({ if($capturedTool.Kind -ne 'static-tool' -and -not (Get-ToolState $capturedTool).Running){$script:desired[$capturedTool.Id]=$true;[void](Start-ManagedTool $capturedTool);Update-AllStates} }.GetNewClosure())
+    $stop.Add_Click({ if($capturedTool.Kind -ne 'static-tool' -and (Get-ToolState $capturedTool).Running){[void](Stop-ManagedTool $capturedTool);Update-AllStates} }.GetNewClosure())
     $open.Add_Click({ Show-Tool $capturedTool }.GetNewClosure())
     $panel.Controls.AddRange(@($accent,$name,$description,$status,$start,$stop,$open))
     $form.Controls.Add($panel)
-    $script:rows[$tool.Id] = [pscustomobject]@{Panel=$panel;Accent=$accent;Status=$status;Start=$start;Stop=$stop;Open=$open}
+    $script:rows[$tool.Id] = [pscustomobject]@{Panel=$panel;Accent=$accent;Name=$name;Status=$status;Description=$description;Start=$start;Stop=$stop;Open=$open}
     $y += 106
 }
 
@@ -321,7 +427,7 @@ $openRoot = New-Object Windows.Forms.Button
 $openRoot.Text = '打开 MiniTools 文件夹'
 $openRoot.Location = New-Object Drawing.Point 24,$y
 $openRoot.Size = New-Object Drawing.Size 170,34
-$openRoot.FlatStyle=[Windows.Forms.FlatStyle]::Flat;$openRoot.FlatAppearance.BorderColor=[Drawing.Color]::Black;$openRoot.BackColor=[Drawing.Color]::White;$openRoot.ForeColor=[Drawing.Color]::Black;$openRoot.UseVisualStyleBackColor=$false;$openRoot.TabStop=$false;$openRoot.Add_MouseUp({$form.ActiveControl=$null})
+$openRoot.FlatStyle=[Windows.Forms.FlatStyle]::Flat;$openRoot.FlatAppearance.BorderColor=[Drawing.Color]::FromArgb(191,191,187);$openRoot.FlatAppearance.MouseOverBackColor=[Drawing.Color]::FromArgb(238,238,235);$openRoot.BackColor=[Drawing.Color]::White;$openRoot.ForeColor=[Drawing.Color]::FromArgb(24,24,24);$openRoot.UseVisualStyleBackColor=$false;$openRoot.TabStop=$false;$openRoot.Add_MouseUp({$form.ActiveControl=$null})
 $openRoot.Add_Click({ Start-Process explorer.exe -ArgumentList ('"{0}"' -f (Split-Path -Parent $controllerPath)) })
 $form.Controls.Add($openRoot)
 
@@ -358,7 +464,7 @@ $form.Add_FormClosing({param($sender,$eventArgs);if(-not $script:exiting -and $e
 
 $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 5000
-$timer.Add_Tick({if(Test-Path -LiteralPath $showRequestPath){Remove-Item -LiteralPath $showRequestPath -Force -ErrorAction SilentlyContinue;$form.Show();$form.Activate()};Update-AllStates})
+$timer.Add_Tick({if(Test-Path -LiteralPath $showRequestPath){Remove-Item -LiteralPath $showRequestPath -Force -ErrorAction SilentlyContinue;$form.Show();$form.Activate()};[void](Set-SystemTheme);Update-AllStates})
 $timer.Start()
 $smokeTimer = $null
 if($SmokeTestSeconds -gt 0){$smokeTimer=New-Object Windows.Forms.Timer;$smokeTimer.Interval=[math]::Max(1000,$SmokeTestSeconds*1000);$smokeTimer.Add_Tick({$smokeTimer.Stop();$script:exiting=$true;[Windows.Forms.Application]::Exit()});$smokeTimer.Start()}
@@ -366,6 +472,7 @@ $previewTimer=$null
 if($ShowOnStart -and $RenderPreviewPath){$previewTimer=New-Object Windows.Forms.Timer;$previewTimer.Interval=1200;$previewTimer.Add_Tick({$previewTimer.Stop();$bitmap=New-Object Drawing.Bitmap $form.Width,$form.Height;$rectangle=New-Object Drawing.Rectangle 0,0,$form.Width,$form.Height;$form.DrawToBitmap($bitmap,$rectangle);$bitmap.Save($RenderPreviewPath,[Drawing.Imaging.ImageFormat]::Png);$bitmap.Dispose()});$previewTimer.Start()}
 try {
     foreach($tool in $tools){if($script:desired[$tool.Id] -and -not (Get-ToolState $tool).Running){[void](Start-ManagedTool $tool -Quiet)}}
+    [void](Set-SystemTheme -Force)
     Update-AllStates
     if($ShowOnStart){$form.Show()}
     Write-ControllerLog ("进入消息循环，ShowOnStart={0}，Visible={1}，Handle={2}。" -f $ShowOnStart,$form.Visible,$form.Handle)
