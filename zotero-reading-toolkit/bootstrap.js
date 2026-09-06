@@ -54,3 +54,6 @@ async function shutdown({ id }, reason) {
 }
 
 function uninstall(data, reason) {}
+
+function onMainWindowLoad({ window }) { Zotero.ReadingTracker?.installNoteMenu(window); }
+function onMainWindowUnload({ window }) { Zotero.ReadingTracker?.removeNoteMenu(window); }

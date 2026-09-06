@@ -5,6 +5,9 @@ var ReadingToolkit = {
   notifierID: null,
   syncingAnnotationIDs: new Set(),
 
+  noteBusy: false,
+  menuWindows: new Set(),
+
   PREF_PREFIX: "extensions.readingtracker.annotationTypes.",
 
   async startup() {
@@ -15,13 +18,99 @@ var ReadingToolkit = {
     ]);
     this.patchStatusTags();
     this.registerSemanticAnnotations();
+    for (const win of Zotero.getMainWindows?.() || []) this.installNoteMenu(win);
     Zotero.debug("Zotero Reading Toolkit: started");
   },
 
   async shutdown() {
+    for (const win of this.menuWindows) this.removeNoteMenu(win);
     this.unregisterSemanticAnnotations();
     this.restoreStatusTags();
     Zotero.debug("Zotero Reading Toolkit: stopped");
+  },
+
+  installNoteMenu(win) {
+    const doc = win.document;
+    const menu = doc.getElementById("menu_ToolsPopup");
+    if (!menu || doc.getElementById("reading-toolkit-create-note")) return;
+    const item = doc.createXULElement("menuitem");
+    item.id = "reading-toolkit-create-note";
+    item.setAttribute("label", "按语义汇总选中文献标注…");
+    item.addEventListener("command", async () => {
+      if (this.noteBusy) return;
+      this.noteBusy = true;
+      item.disabled = true;
+      try {
+        const count = await this.createReadingNotes(win.ZoteroPane.getSelectedItems());
+        win.alert(count ? `已创建 ${count} 篇阅读笔记。` : "请选择带有 PDF 标注的文献或 PDF 附件。");
+      } catch (error) { Zotero.logError(error); win.alert(`创建阅读笔记失败：${error.message}`); }
+      finally { this.noteBusy = false; item.disabled = false; }
+    });
+    menu.appendChild(item);
+    this.menuWindows.add(win);
+  },
+
+  removeNoteMenu(win) {
+    win.document.getElementById("reading-toolkit-create-note")?.remove();
+    this.menuWindows.delete(win);
+  },
+
+  async createReadingNotes(selected) {
+    const parents = new Map();
+    for (const item of selected) {
+      const parent = item.isAttachment?.() && item.parentID ? Zotero.Items.get(item.parentID) : item;
+      if (parent?.isRegularItem?.() || parent?.isPDFAttachment?.()) parents.set(parent.id, parent);
+    }
+    // Prepare all notes before a single transaction, preventing partially completed batches.
+    const notes = [];
+    for (const parent of parents.values()) {
+      if (!Zotero.Libraries.get(parent.libraryID).editable) throw new Error("所选文献库为只读。");
+      const attachments = parent.isPDFAttachment?.() ? [parent] : Zotero.Items.get(parent.getAttachments());
+      const entries = [];
+      for (const attachment of attachments) {
+        if (!attachment.isPDFAttachment()) continue;
+        const library = Zotero.Libraries.get(attachment.libraryID);
+        const scope = library.libraryType === "group" ? `groups/${Zotero.Groups.getGroupIDFromLibraryID(attachment.libraryID)}` : "library";
+        const annotations = [...attachment.getAnnotations()].sort((a,b) => String(a.annotationSortIndex).localeCompare(String(b.annotationSortIndex)));
+        for (const annotation of annotations) {
+          entries.push({
+            label: this.getAnnotationType(annotation.annotationColor)?.label || "其他",
+            text: annotation.annotationText || "", comment: annotation.annotationComment || "",
+            page: annotation.annotationPageLabel || "?",
+            url: `zotero://open-pdf/${scope}/items/${encodeURIComponent(attachment.key)}?annotation=${encodeURIComponent(annotation.key)}`
+          });
+        }
+      }
+      if (!entries.length) continue;
+      const note = new Zotero.Item("note");
+      note.libraryID = parent.libraryID;
+      if (parent.isRegularItem?.()) note.parentID = parent.id;
+      else if (parent.getCollections) note.setCollections(parent.getCollections());
+      note.setNote(this.renderReadingNote(parent.getField("title"), entries));
+      notes.push(note);
+    }
+    await Zotero.DB.executeTransaction(async () => { for (const note of notes) await note.save(); });
+    return notes.length;
+  },
+
+  renderReadingNote(title, entries) {
+    const escape = value => this.escapeHTML(value).replaceAll("\n", "<br/>");
+    const groups = new Map(this.getAnnotationDefinitions().map(type => [type.label, []]));
+    for (const entry of entries) {
+      if (!groups.has(entry.label)) groups.set(entry.label, []);
+      groups.get(entry.label).push(entry);
+    }
+    let html = `<h1>${escape(title)} · 阅读笔记</h1>`;
+    for (const [label, annotations] of groups) {
+      if (!annotations.length) continue;
+      html += `<h2>${escape(label)}</h2>`;
+      for (const annotation of annotations) {
+        html += `<blockquote>${escape(annotation.text || "（图片或非文字标注，点击原文查看）")}</blockquote>`;
+        if (annotation.comment) html += `<p>${escape(annotation.comment)}</p>`;
+        html += `<p><a href="${this.escapeHTML(annotation.url)}">第 ${escape(annotation.page)} 页 · 返回标注</a></p>`;
+      }
+    }
+    return html;
   },
 
   getPref(key, fallback) {

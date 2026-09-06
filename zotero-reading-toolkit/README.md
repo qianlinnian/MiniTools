@@ -51,3 +51,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build.ps1
 ## 第三方说明
 
 语义颜色菜单的接入方式参考了 MIT 许可的 Zotero Highlight Color Descriptions。详情见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+
+## v0.3.0 阅读笔记汇总
+
+在文献列表选中文献或 PDF 附件，打开“工具 → 按语义汇总选中文献标注…”。插件按当前自定义语义名称分组，创建新的原生 Zotero 笔记，包含标注文字、评论、页码和返回标注链接。图片标注保留跳转入口，不嵌入截图。
+
+同一批选择中的文献和附件会去重；选择文献的某个附件时汇总该文献全部 PDF。多篇笔记使用同一事务保存，只读库会拒绝操作。每次执行创建新笔记，不覆盖已有笔记。独立 PDF 的笔记保存在同一文献库和分类中。
+
+新增测试：`node tests/notes.test.js`。自动测试覆盖分组、转义、去重、群组链接和只读库；真实 Zotero 窗口中的交互仍需安装新版后验收。

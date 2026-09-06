@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Zotero Reading Toolkit",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Semantic annotation types and mutually exclusive reading-status tags.",
   "author": "Local toolkit",
   "applications": {
