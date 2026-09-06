@@ -16,7 +16,8 @@
     "check:memory": "node scripts/check-memory-integration.mjs",
     "check:feishu-doc": "node scripts/check-feishu-docs.mjs --create-test-document --delete-after-check",
     "doc:cli": "node scripts/feishu-doc-cli.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "check:codex": "node scripts/check-codex.mjs"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.64.0",

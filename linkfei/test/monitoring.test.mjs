@@ -60,3 +60,31 @@ test("通知服务会把队列消息主动发送到 chatId", async () => {
   assert.match(sent[0].markdown, /手机提醒/);
   storage.close();
 });
+
+
+test("通知历史按私聊隔离，重发只接受失败状态且不可重复排队", () => {
+  const storage = createSqliteStore({ databasePath: ":memory:" });
+  storage.bindDefaultNotificationRecipient({ chatId: "chat-1" });
+  storage.enqueueNotification({ title: "私有标题", body: "内容" });
+  const job = storage.claimDueNotification();
+  assert.equal(storage.requeueNotification(job.id, "chat-1"), false);
+  storage.retryNotification(job.id, "失败", { dead: true });
+  assert.equal(storage.listNotifications({ chatId: "chat-2" }).length, 0);
+  assert.equal(storage.requeueNotification(job.id, "chat-2"), false);
+  assert.equal(storage.requeueNotification(job.id, "chat-1"), true);
+  assert.equal(storage.requeueNotification(job.id, "chat-1"), false);
+  const retry = storage.claimDueNotification();
+  assert.equal(retry.id, job.id);
+  assert.equal(retry.attempts, 1);
+  storage.completeNotification(retry.id);
+  assert.equal(storage.requeueNotification(job.id, "chat-1"), false);
+  storage.close();
+});
+
+test("摘要差异区分增删，并明确摘要范围之外的变化", async () => {
+  const { describePageChange } = await import("../src/monitoring/notification-service.mjs");
+  assert.match(describePageChange("价格100元", "价格200元"), /移除：1.*新增：2/s);
+  assert.match(describePageChange("正文", "正文新增"), /新增：新增/);
+  assert.match(describePageChange("正文", "正文"), /其他区域/);
+  assert.match(describePageChange("正文删除", "正文"), /移除：删除/);
+});

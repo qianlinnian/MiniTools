@@ -7,6 +7,19 @@ const LEVEL_ICONS = {
   error: "❌",
 };
 
+export function describePageChange(previous, current) {
+  const before = String(previous || "");
+  const after = String(current || "");
+  if (before === after) return "页面其他区域发生变化，前 1200 字摘要未变化。";
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start++;
+  let end = 0;
+  while (end < before.length - start && end < after.length - start && before[before.length - 1 - end] === after[after.length - 1 - end]) end++;
+  const removed = before.slice(start, before.length - end);
+  const added = after.slice(start, after.length - end);
+  return `摘要差异（仅比较前 1200 字）：\n移除：${removed.slice(0, 500) || "（无）"}\n新增：${added.slice(0, 500) || "（无）"}`;
+}
+
 function nextIso(delayMs) {
   return new Date(Date.now() + delayMs).toISOString();
 }
@@ -71,7 +84,7 @@ export function createNotificationService({
       if (changed) {
         storage.enqueueNotification({
           title: `页面已更新：${monitor.name}`,
-          body: `监控内容发生变化。\n\n当前内容摘要：\n${snapshot.excerpt}`,
+          body: `${describePageChange(monitor.last_excerpt, snapshot.excerpt)}\n\n当前内容摘要：\n${snapshot.excerpt}`,
           url: snapshot.finalUrl,
           level: "success",
           idempotencyKey: `monitor:${monitor.id}:change:${snapshot.hash}`,

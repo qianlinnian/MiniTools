@@ -141,3 +141,26 @@ test("never exposes or injects personal memory in a group chat", async () => {
   assert.doesNotMatch(sent.at(-1)[1].markdown, /SECRET-42/);
   storage.close();
 });
+
+
+test("notification history and retry never disclose another chat's jobs", async () => {
+  const storage = new SqliteStore({ databasePath: ":memory:" });
+  storage.bindDefaultNotificationRecipient({ chatId: "chat-1" });
+  storage.enqueueNotification({ title: "PRIVATE TITLE", body: "private body" });
+  const job = storage.claimDueNotification();
+  storage.retryNotification(job.id, "failure", { dead: true });
+  const sent = [];
+  const bot = createBot({ channel: { send: async (...args) => sent.push(args), rawClient: {} },
+    storage, deepseek: {}, config: testConfig() });
+  await bot.processMessage(message("h1", "/notify history", { chatId: "chat-2", senderId: "user-2" }));
+  assert.doesNotMatch(sent.at(-1)[1].markdown, /PRIVATE TITLE/);
+  await bot.processMessage(message("h2", "/notify history", { chatType: "group" }));
+  assert.match(sent.at(-1)[1].markdown, /请在私聊/);
+  await bot.processMessage(message("h3", "/notify history"));
+  assert.match(sent.at(-1)[1].markdown, /PRIVATE TITLE/);
+  await bot.processMessage(message("h4", `/notify retry ${job.id}`, { chatId: "chat-2", senderId: "user-2" }));
+  assert.equal(storage.listNotifications()[0].status, "dead");
+  await bot.processMessage(message("h5", `/notify retry ${job.id}`));
+  assert.equal(storage.listNotifications()[0].status, "pending");
+  storage.close();
+});

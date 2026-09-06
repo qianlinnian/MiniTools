@@ -35,9 +35,10 @@ test("chat sends an OpenAI-compatible request and returns text", async () => {
   assert.equal(JSON.parse(captured.options.body).model, "deepseek-v4-flash");
   assert.equal(result.content, "OK");
 });
+
 test("chat reports API errors without exposing the key", async () => {
   const client = createDeepSeekClient({
-    apiKey: "test-key",
+    apiKey: "secret-value",
     baseUrl: "https://api.deepseek.com",
     fetchImpl: async () =>
       new Response(JSON.stringify({ error: { message: "bad request" } }), {

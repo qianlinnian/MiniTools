@@ -30,14 +30,14 @@ function monitorId(options) {
   return id;
 }
 
-const HELP = `LinkFei 主动通知与网页监控 CLI
+const HELP = `LinkFei 飞书主动消息 CLI
 
-通知：
+主动发送飞书消息（适用于任务结果、提醒、异常和其他后台事件）：
   npm run notify -- send --title "标题" --body "正文" [--url "https://..."] [--level info]
   npm run notify -- send --title "标题" --body-file "D:\\path\\body.md"
   npm run notify -- status
 
-监控：
+可选的网页变化触发器：
   npm run notify -- watch-add --name "页面名" --url "https://..." --interval 30m [--selector "main"]
   npm run notify -- watch-list
   npm run notify -- watch-check|watch-pause|watch-resume|watch-delete --id 1`;

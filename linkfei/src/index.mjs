@@ -1,3 +1,4 @@
+import { CodexBridge } from "./codex/bridge.mjs";
 import { createLarkChannel, LoggerLevel } from "@larksuiteoapi/node-sdk";
 
 import { createBot } from "./bot.mjs";
@@ -37,7 +38,8 @@ const notificationService = createNotificationService({
   storage,
   send: (chatId, markdown) => channel.send(chatId, { markdown }),
 });
-const bot = createBot({ channel, deepseek, storage, notificationService, config });
+const codexBridge = config.codex?.enabled ? new CodexBridge({ storage, config: config.codex }) : null;
+const bot = createBot({ channel, deepseek, storage, notificationService, codexBridge, config });
 const runtimeState = { state: "starting" };
 let closing = false;
 let runtimeControl;
@@ -88,6 +90,7 @@ async function shutdown(signal) {
   runtimeState.state = "stopping";
   console.log(`[linkfei] 收到 ${signal}，正在关闭数据库。`);
   notificationService.stop();
+  codexBridge?.close();
   await runtimeControl?.close().catch((error) => {
     console.error("[linkfei] 关闭本地控制端点失败", error?.message || error);
   });
@@ -100,13 +103,14 @@ process.once("SIGTERM", () => void shutdown("SIGTERM"));
 runtimeControl = await startRuntimeControl({
   runtimePath: "data/linkfei-runtime.json",
   projectPath: process.cwd(),
-  status: () => ({ state: runtimeState.state }),
+  status: () => ({ state: runtimeState.state, codexRemoteEnabled: Boolean(codexBridge) }),
   onShutdown: (reason) => void shutdown(reason),
 });
 
 console.log("[linkfei] 正在连接飞书长连接……");
 try {
   await channel.connect();
+  codexBridge?.start();
   notificationService.start();
   runtimeState.state = "connected";
   console.log("[linkfei] 已连接，等待消息。", {

@@ -1,5 +1,10 @@
+import { routeNaturalLanguageIntent } from "./natural-intent.mjs";
+
 export const SYSTEM_PROMPT = [
-  "你是运行在飞书中的中文 AI 助手。",
+  "你是 LinkFei，一个运行在飞书中的中文 AI 机器人；对用户始终以 LinkFei 的身份回答。",
+  "DeepSeek 是你用于理解和生成文本的语言模型，但不是你面对用户时的产品身份。不要把自己描述成没有工具、没有指令的通用大语言模型。",
+  "LinkFei 后端真实支持这些斜杠指令：/help 查看帮助，/pro 使用 Pro 模型，/doc 创建飞书文档，/new 和 /reset 管理会话，/remember、/memory、/forget 管理个人长期记忆，/kb 管理知识库，/tasks 查看文档任务，/notify 主动向绑定收件人发送飞书消息，/watch 可选地用网页变化触发飞书消息。",
+  "用户询问你的身份、功能或指令时，应准确介绍 LinkFei 的真实能力，并提示使用 /help 查看完整用法；不得否认上述指令和飞书文档、记忆、通知等后端能力。",
   "回答要准确、清晰、可直接用于工作。",
   "除非用户要求展开，否则先给结论，再给必要步骤。",
   "不要声称已经创建、修改或发送了任何实际资源，除非工具明确返回成功。",
@@ -39,7 +44,7 @@ export function parseCommand(text, defaultTier = "flash") {
   const notify = commandBody(text, /^\/(?:notify\b|通知)(?:\s+|$)/i);
   if (notify !== null) {
     const [action = "help", ...rest] = notify.split(/\s+/);
-    const actions = { 绑定: "bind", 测试: "test", 状态: "status" };
+    const actions = { 绑定: "bind", 测试: "test", 状态: "status", 历史: "history", 重试: "retry" };
     return {
       type: "notify",
       action: actions[action] || action.toLowerCase(),
@@ -109,6 +114,8 @@ export function parseCommand(text, defaultTier = "flash") {
       prompt: text.slice(proMatch[0].length).trim(),
     };
   }
+  const naturalIntent = routeNaturalLanguageIntent(text);
+  if (naturalIntent) return naturalIntent;
   return { type: "chat", tier: defaultTier, prompt: text };
 }
 
@@ -265,6 +272,8 @@ export function extractText(message) {
 export const HELP_TEXT = [
   "你好，我是 LinkFei。",
   "",
+  "你可以直接用自然语言要求我执行操作，也可以使用下面的斜杠指令。删除类操作仍需明确命令确认。",
+  "",
   "- 直接发送文字：结合持久会话、相关记忆和知识库回答",
   "- `/pro 你的问题`：使用 Pro 模型处理复杂任务",
   "- `/doc 标题 | 要求`：生成并创建飞书文档",
@@ -275,9 +284,12 @@ export const HELP_TEXT = [
   "- `/kb add 标题 | 内容`：添加当前私聊/群聊知识",
   "- `/kb list`、`/kb search 关键词`、`/kb delete 编号`：管理知识库",
   "- `/tasks`：查看最近文档任务",
-  "- `/notify bind`：在私聊中绑定主动提醒收件人，并自动发送验收通知",
-  "- `/notify test`：发送一条主动提醒测试",
-  "- `/watch add 名称 | URL | 30m | CSS选择器（可选）`：监控页面更新",
+  "- `/notify bind`：在私聊中绑定飞书主动消息收件人，并自动发送验收消息",
+  "- `/notify test`：主动发送一条飞书测试消息",
+  "- `/notify status`：查看飞书主动消息发送状态",
+    "- `/notify history`、`/notify retry 编号`：私聊查看通知记录、重试失败通知",
+  "- `/watch add 名称 | URL | 30m | CSS选择器（可选）`：可选的网页变化触发器",
   "- `/watch list`、`/watch check 编号`、`/watch pause/resume/delete 编号`：管理监控",
-  "- `/help`：显示本帮助",
+  "- `/codex help`：查看 Codex 远程控制（需在电脑启用）",
+    "- `/help`：显示本帮助",
 ].join("\n");

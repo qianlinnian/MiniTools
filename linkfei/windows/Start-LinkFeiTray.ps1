@@ -31,7 +31,7 @@ function Get-NodePath {
     }
     $command = Get-Command node -ErrorAction SilentlyContinue
     if ($command -and $command.Source) { return $command.Source }
-    $fallback = Join-Path $env:ProgramFiles 'nodejs\node.exe'
+    $fallback = 'D:\software\node\node.exe'
     if (Test-Path -LiteralPath $fallback -PathType Leaf) { return $fallback }
     throw '没有找到 Node.js。请安装 Node.js 22.5+，或设置 LINKFEI_NODE_PATH。'
 }

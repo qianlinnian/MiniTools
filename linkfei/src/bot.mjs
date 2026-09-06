@@ -36,7 +36,7 @@ function formatDocumentTasks(tasks) {
   ].join("\n");
 }
 
-export function createBot({ channel, deepseek, storage, notificationService, config, logger = console }) {
+export function createBot({ channel, deepseek, storage, notificationService, codexBridge, config, logger = console }) {
   const conversations = new ConversationService({
     storage,
     deepseek,
@@ -110,11 +110,15 @@ export function createBot({ channel, deepseek, storage, notificationService, con
   }
 
   async function handleMessage(message, text) {
+    if (/^\/codex(?:\s|$)/i.test(text)) {
+      return reply(message, codexBridge ? await codexBridge.handle(message, text) : "Codex 远程控制尚未配置。");
+    }
     const command = parseCommand(text, config.deepseek.defaultTier);
     const ownerId = ownerIdFor(message);
     const scopeId = message.chatId;
 
     if (command.type === "help") return reply(message, HELP_TEXT);
+    if (command.type === "guidance") return reply(message, command.message);
     if (command.type === "reset" || command.type === "new") {
       conversations.clear(scopeId);
       return reply(
@@ -162,17 +166,17 @@ export function createBot({ channel, deepseek, storage, notificationService, con
     if (command.type === "notify") {
       if (command.action === "bind") {
         if (message.chatType === "group") {
-          return reply(message, "主动提醒收件人只能在与机器人的私聊中绑定。");
+          return reply(message, "飞书主动消息收件人只能在与机器人的私聊中绑定。");
         }
         storage.bindDefaultNotificationRecipient({
           chatId: message.chatId,
           userId: ownerId,
           label: command.value || "默认飞书收件人",
         });
-        await reply(message, "已把当前私聊绑定为默认主动提醒收件人。正在另行发送一条主动推送验收消息；以后页面更新和其他 Codex 会话的通知都会发到这里。");
+        await reply(message, "已把当前私聊绑定为默认飞书主动消息收件人。正在另行发送一条验收消息；以后 Codex 任务完成或失败、定时提醒、后台事件以及可选的页面更新通知都可以发到这里。");
         notificationService.enqueue({
-          title: "LinkFei 主动提醒已启用",
-          body: "这是一条不依附于原消息的主动通知。手机端收到弹窗即代表主动提醒链路工作正常。",
+          title: "LinkFei 飞书主动消息已启用",
+          body: "这是一条由 LinkFei 主动发出的独立消息。它可以用于任务结果、提醒、异常和其他后台事件，并不局限于网页监控。手机端收到弹窗即代表消息通道工作正常。",
           level: "success",
           idempotencyKey: `bind-test:${message.messageId}`,
         });
@@ -183,30 +187,43 @@ export function createBot({ channel, deepseek, storage, notificationService, con
           return reply(message, "尚未绑定收件人，请先在私聊中发送 `/notify bind`。");
         }
         notificationService.enqueue({
-          title: "LinkFei 主动提醒测试",
-          body: "如果手机端收到了这条消息，说明主动通知链路工作正常。",
+          title: "LinkFei 飞书主动消息测试",
+          body: "如果手机端收到了这条消息，说明通用飞书主动消息通道工作正常。",
           level: "success",
           idempotencyKey: `manual-test:${message.messageId}`,
         });
         return reply(message, "测试提醒已进入可靠发送队列。");
       }
+      if (["history", "retry"].includes(command.action)) {
+        if (message.chatType === "group") return reply(message, "请在私聊中查看或重试自己的通知。");
+        if (command.action === "retry") {
+          const id = /^\d+$/.test(command.value) ? Number(command.value) : NaN;
+          const changed = storage.requeueNotification(id, message.chatId);
+          return reply(message, changed ? "已重新排队，将在下一次发送周期重试。" : "没有可重试的通知；仅支持当前私聊中失败或等待重试的编号。");
+        }
+        const labels = { pending: "待发送", retry: "等待重试", sending: "发送中", sent: "已发送", dead: "最终失败" };
+        const jobs = storage.listNotifications({ limit: 10, chatId: message.chatId });
+        return reply(message, jobs.length ? jobs.map(job =>
+          `#${job.id} ${labels[job.status]} · ${job.title}\n尝试 ${job.attempts} 次 · ${job.updated_at}${["pending", "retry"].includes(job.status) ? `\n下次发送：${job.next_attempt_at}` : ""}`
+        ).join("\n\n") : "当前私聊暂无通知记录。");
+      }
       if (command.action === "status") {
         const recipient = storage.getDefaultNotificationRecipient();
-        const jobs = storage.listNotifications({ limit: 10 });
+        const jobs = storage.listNotifications({ limit: 10, chatId: message.chatId });
         const counts = jobs.reduce((all, job) => ({ ...all, [job.status]: (all[job.status] || 0) + 1 }), {});
         return reply(
           message,
           recipient
-            ? `主动提醒已绑定。最近 10 条：已发送 ${counts.sent || 0}，待发送/重试 ${(counts.pending || 0) + (counts.retry || 0)}，永久失败 ${counts.dead || 0}。`
-            : "主动提醒尚未绑定，请在私聊中发送 `/notify bind`。",
+            ? `飞书主动消息已绑定。最近 10 条：已发送 ${counts.sent || 0}，待发送/重试 ${(counts.pending || 0) + (counts.retry || 0)}，永久失败 ${counts.dead || 0}。`
+            : "飞书主动消息尚未绑定，请在私聊中发送 `/notify bind`。",
         );
       }
-      return reply(message, "通知命令：`/notify bind`、`/notify test`、`/notify status`。");
+      return reply(message, "通知命令：`/notify bind`、`/notify test`、`/notify status`、`/notify history`、`/notify retry 编号`。");
     }
     if (command.type === "watch") {
       if (command.action === "add") {
         if (!storage.getDefaultNotificationRecipient()) {
-          return reply(message, "请先在私聊中发送 `/notify bind`，设置页面更新通知的收件人。");
+          return reply(message, "请先在私聊中发送 `/notify bind`，设置飞书主动消息收件人。");
         }
         const intervalSeconds = parseInterval(command.interval);
         if (!command.name || !command.url || !intervalSeconds) {

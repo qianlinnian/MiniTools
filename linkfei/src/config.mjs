@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 
 function firstEnv(...names) {
   for (const name of names) {
@@ -21,7 +22,10 @@ function normalizeBaseUrl(value) {
 export function loadConfig() {
   const defaultTier = (firstEnv("BOT_MODEL") || "flash").toLowerCase();
 
+  const remotePath = resolve(firstEnv("LINKFEI_CODEX_CONFIG") || "data/codex-remote.json");
+  const codex = existsSync(remotePath) ? JSON.parse(readFileSync(remotePath, "utf8").replace(/^\uFEFF/, "")) : { enabled: false };
   return {
+    codex,
     deepseek: {
       apiKey: firstEnv("DEEPSEEK_API_KEY", "DEEPSEEK-KEY"),
       baseUrl: normalizeBaseUrl(

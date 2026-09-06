@@ -626,10 +626,19 @@ export class SqliteStore extends Storage {
       );
   }
 
-  listNotifications({ limit = 20 } = {}) {
+  requeueNotification(id, chatId) {
+    if (!Number.isSafeInteger(id) || id <= 0) return false;
+    const timestamp = now();
+    return this.db.prepare(`UPDATE notification_outbox
+      SET status = 'pending', attempts = 0, next_attempt_at = ?, updated_at = ?
+      WHERE id = ? AND chat_id = ? AND status IN ('dead', 'retry')`)
+      .run(timestamp, timestamp, id, chatId).changes > 0;
+  }
+
+  listNotifications({ limit = 20, chatId = null } = {}) {
     return this.db
-      .prepare("SELECT * FROM notification_outbox ORDER BY id DESC LIMIT ?")
-      .all(limit)
+      .prepare("SELECT * FROM notification_outbox WHERE (? IS NULL OR chat_id = ?) ORDER BY id DESC LIMIT ?")
+      .all(chatId, chatId, limit)
       .map((row) => ({ ...row, id: asNumber(row.id), attempts: asNumber(row.attempts) }));
   }
 
